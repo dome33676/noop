@@ -130,7 +130,7 @@ private struct SessionDetailView: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: session.name) {
+        ScreenScaffold(title: LocalizedStringKey(session.name)) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 ForEach(byExercise) { group in
                     NoopCard {

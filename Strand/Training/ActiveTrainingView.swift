@@ -35,7 +35,7 @@ struct ActiveTrainingView: View {
     }
 
     private var content: some View {
-        ScreenScaffold(title: controller.session.name, subtitle: "Training in progress") {
+        ScreenScaffold(title: LocalizedStringKey(controller.session.name), subtitle: "Training in progress") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 elapsedHeader
                 exerciseChips

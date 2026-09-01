@@ -23,7 +23,7 @@ struct ExerciseProgressionView: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: exerciseName, subtitle: "Weight over time", onRefresh: { await reload() }) {
+        ScreenScaffold(title: LocalizedStringKey(exerciseName), subtitle: "Weight over time", onRefresh: { await reload() }) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 ChartCard(title: "WEIGHT", subtitle: "kg, across all trainings", tint: StrandPalette.effortColor) {
                     if points.count >= 2 {
