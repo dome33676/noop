@@ -27,8 +27,9 @@ local SQLite — has no network layer at all: no phone-home, no analytics, no ac
 no login, no cloud sync, and no telemetry. Everything NOOP computes about you lives in a
 single SQLite file on your own device.
 
-There are exactly **three** opt-in network exceptions: the **AI Coach** (§1.1a), the **Oura history
-import** (§1.1b), and Android's Experimental **self-hosted push** (§1.1d). The AI Coach is off until
+There are exactly **four** opt-in network exceptions: the **AI Coach** (§1.1a), the **Oura history
+import** (§1.1b), Android's Experimental **self-hosted push** (§1.1d), and the **Open Food Facts
+lookup** in the Food tab (§1.1e). The AI Coach is off until
 you turn it on with your own API key; when you
 ask it a question it sends a short text summary of your recent metrics to the provider you
 choose. The Oura history import is **not even compiled into a default build** — the code
@@ -36,7 +37,9 @@ only exists in your binary if you build from source with your own Oura developer
 credentials (§1.1b); instead of sending data out, it pulls your own Oura data **in** over
 OAuth, once, and never sends any of your existing NOOP data out. Self-hosted push is off until an
 Android user configures their own endpoint and bearer token; it then exports registered streams one
-way after offload and never reads records back. Nothing else in the app touches the network.
+way after offload and never reads records back. The Open Food Facts lookup is off until you enable
+it in Settings; it then sends only a search term or scanned barcode to look up a food, and nothing
+else. Nothing else in the app touches the network.
 
 Data enters or leaves NOOP only through these explicit paths:
 
@@ -47,13 +50,15 @@ Data enters or leaves NOOP only through these explicit paths:
 | Oura history import (opt-in build flag, §1.1b) | HTTPS OAuth + REST, `api.ouraring.com` → device | Read-only from your own Oura account |
 | Apple Health export, incl. iOS "Export for Shortcuts" | On-device, user-initiated | NOOP → your Apple Health, on your device only (§1.3) |
 | Self-hosted push (Experimental, Android, §1.1d) | HTTP(S), configured endpoint | One-way NOOP → user-owned receiver |
+| Open Food Facts lookup (opt-in, iOS, §1.1e) | HTTPS REST, `world.openfoodfacts.org` → device | Read-only, one search term or barcode per lookup |
 
 The **network** paths are the opt-in AI Coach, the compile-time-optional Oura history import, the
-update check (§1.1c), and Android's default-off Experimental self-hosted push (§1.1d); the
+update check (§1.1c), Android's default-off Experimental self-hosted push (§1.1d), and the
+opt-in Open Food Facts lookup (§1.1e); the
 biometric pipeline produces no network traffic of any kind. The Apple Health export above is
 an **on-device** hand-off, not a network upload — see §1.3.
 
-### 1.1 Network code: the four exceptions
+### 1.1 Network code: the five exceptions
 
 The biometric pipeline and all five Swift packages
 (`WhoopProtocol`, `WhoopStore`, `StrandAnalytics`, `StrandImport`, `StrandDesign`)
@@ -69,7 +74,8 @@ the local BLE ring-pairing lane, not a network API, so it has no equivalent to �
 networking anywhere in the app is the AI Coach (`Strand/AI/AICoach.swift` on the
 Swift side — macOS and iOS — `com.noop.ai.AiCoach` on Android), described in §1.1a,
 the Oura history import (`Strand/Oura/`, Swift-only — macOS and iOS), described in §1.1b,
-the update check, described in §1.1c, and the Android-only self-hosted push, described in §1.1d.
+the update check, described in §1.1c, the Android-only self-hosted push, described in §1.1d, and the
+Open Food Facts lookup (`Strand/Food/OpenFoodFactsClient.swift`, Swift-only — iOS), described in §1.1e.
 
 The package manifests reference dependency *download* URLs that Swift Package Manager
 resolves at build time, never at runtime:
@@ -84,8 +90,9 @@ importers. Neither opens a socket.
 
 ### 1.1a The AI Coach (optional, off by default, bring your own key)
 
-The AI Coach lets you ask questions about your data in plain language. It is one of three optional
-network paths (the others are the Oura history import, §1.1b, and self-hosted push, §1.1d), and only
+The AI Coach lets you ask questions about your data in plain language. It is one of four optional
+network paths (the others are the Oura history import, §1.1b, self-hosted push, §1.1d, and the Open
+Food Facts lookup, §1.1e), and only
 on your terms:
 
 - **Off until you enable it.** You enter your own API key for the provider you choose
@@ -103,7 +110,8 @@ on your terms:
   provider you picked, under your own account. NOOP runs no server in between and keeps
   no copy.
 
-If you never enable the AI Coach or self-hosted push and never build the Oura import in (§1.1b),
+If you never enable the AI Coach, self-hosted push, or the Open Food Facts lookup, and never build
+the Oura import in (§1.1b),
 NOOP makes zero application network connections — and in a default build, the Oura code isn't in
 the binary to begin with.
 
@@ -206,6 +214,29 @@ not a NOOP cloud, account, restore path, or two-way sync:
 
 The repository ships the Android client and protocol document, not a server. The feature remains
 Experimental and default-off under the boundary in [`SCOPE.md`](SCOPE.md).
+
+### 1.1e Open Food Facts lookup (opt-in, off by default, iOS)
+
+The Food tab's meal log is built on a food library the user maintains themselves; every field is
+hand-editable and the library works fully offline. The Open Food Facts (OFF) lookup is an optional
+convenience that pre-fills a new library item from OFF's free, crowd-sourced, independently-run
+product database instead of typing macros in by hand:
+
+- **Off until you enable it.** The Settings toggle ("Look up foods online") defaults to **off**. With
+  it off, searching or scanning in the Food tab only ever searches the local library — no request
+  leaves the device.
+- **What is sent.** With the toggle on, a food search sends the typed search term, and a barcode scan
+  sends the scanned barcode, to `world.openfoodfacts.org` over HTTPS. No API key, account, or
+  identifier is attached — OFF's public API requires none.
+- **What is NOT sent.** No food-log entries, no macro totals, no WHOOP or health data of any kind —
+  only the search term or barcode for that one lookup.
+- **What comes back.** A product name and, where OFF has them, macros per 100g. The result is offered
+  as a pre-filled, still-editable food-library item — nothing is written to the library until the
+  user saves it.
+- **Not NOOP's data.** OFF is an independent, crowd-sourced database; NOOP does not operate, vet, or
+  guarantee the accuracy of its entries. Review a looked-up item before logging a meal against it.
+
+Code: `Strand/Food/OpenFoodFactsClient.swift` (Swift, iOS-only for now — see `docs/IOS.md`).
 
 ### 1.2 The macOS sandbox (and what it means for the AI Coach and the Oura import)
 
@@ -580,7 +611,7 @@ dedicated source id `nutrition-csv`, alongside your other metrics and entirely o
 
 | Surface | Risk | Mitigation | Where |
 |---------|------|------------|-------|
-| Process | Data exfiltration / network egress | Three explicit paths: AI Coach (your key, chosen provider, summary only — §1.1a), Oura history import (your OAuth app, inbound-only — §1.1b), and Android self-hosted push (default-off, user-owned endpoint, one-way versioned batches — §1.1d). No NOOP server, account, or telemetry; ordinary BLE/offline use makes no application network request. | `Strand/AI/AICoach.swift`, `Strand/Oura/`, `android/.../ai/AiCoach.kt`, `docs/PUSH_PROTOCOL.md` |
+| Process | Data exfiltration / network egress | Four explicit paths: AI Coach (your key, chosen provider, summary only — §1.1a), Oura history import (your OAuth app, inbound-only — §1.1b), Android self-hosted push (default-off, user-owned endpoint, one-way versioned batches — §1.1d), and the Open Food Facts lookup (default-off, iOS, one search term or barcode per lookup — §1.1e). No NOOP server, account, or telemetry; ordinary BLE/offline use makes no application network request. | `Strand/AI/AICoach.swift`, `Strand/Oura/`, `android/.../ai/AiCoach.kt`, `docs/PUSH_PROTOCOL.md`, `Strand/Food/OpenFoodFactsClient.swift` |
 | Oura history import | OAuth token / scope leakage, cross-account data mixing | Compiled out by default (`OURA_CLOUD_IMPORT`, §1.1b); tokens Keychain-only (`kSecAttrAccessibleAfterFirstUnlock`, never UserDefaults/plist); fixed OAuth scopes set at build time; raw + normalized rows partitioned under `deviceId = "oura-api"`; Oura's own scores kept reference-only (`ref_*`/`oura_*` metricSeries keys, never NOOP's Charge/Effort/Rest); `.cloudImport` is structurally priority-2 so it never seizes a WHOOP day; Forget Oura access purges tokens + every `oura-api` row incl. the raw archive | `Strand/Oura/OuraTokenStore.swift`, `Strand/Oura/OuraConnectModel.swift`, `Packages/WhoopStore/Sources/WhoopStore/OuraRawStore.swift` |
 | Filesystem | Broad disk access | Only `files.user-selected.read-write`; data stays in the sandbox container | `Strand.entitlements`, `Strand/Collect/StorePaths.swift` |
 | BLE frames | Malformed / adversarial packets | CRC8 + CRC32 (+ CRC16 for v5) gating; reject on failure | `WhoopProtocol/Framing.swift`, `Strand/BLE/FrameRouter.swift` |

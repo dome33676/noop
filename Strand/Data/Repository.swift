@@ -2562,6 +2562,48 @@ final class Repository: ObservableObject {
         _ = try? await store.deleteJournal(deviceId: Self.journalDeviceId, day: day, question: question)
     }
 
+    // MARK: - Food tracking
+
+    /// The user's food library, most-recently-created first.
+    func foodItems() async -> [FoodItemRow] {
+        guard let store = await ensureStore() else { return [] }
+        return (try? await store.foodItems(deviceId: WhoopStore.foodLogSourceId)) ?? []
+    }
+
+    /// Name search over the food library, for the meal-logging search field.
+    func searchFoodItems(query: String) async -> [FoodItemRow] {
+        guard let store = await ensureStore() else { return [] }
+        return (try? await store.searchFoodItems(deviceId: WhoopStore.foodLogSourceId, query: query)) ?? []
+    }
+
+    /// Create or edit (by re-passing the same `id`) one food-library item.
+    func saveFoodItem(_ item: FoodItemRow) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.upsertFoodItem(item)
+    }
+
+    func deleteFoodItem(id: String) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.deleteFoodItem(id: id)
+    }
+
+    /// One day's logged meals, oldest first.
+    func mealEntries(day: String) async -> [MealEntryRow] {
+        guard let store = await ensureStore() else { return [] }
+        return (try? await store.mealEntries(deviceId: WhoopStore.foodLogSourceId, day: day)) ?? []
+    }
+
+    /// Log (or edit, by re-passing the same `id`) one meal entry.
+    func logMeal(_ entry: MealEntryRow) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.logMeal(entry)
+    }
+
+    func deleteMealEntry(id: String) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.deleteMealEntry(id: id)
+    }
+
     /// All workouts (Whoop + Apple Health + on-device detected bouts), newest first.
     ///
     /// Detected bouts are surfaced with an honest "Detected" badge so the user can see , and

@@ -297,6 +297,9 @@ struct SettingsView: View {
     /// #1659. Default comes from `UpdateAvailability.defaultEnabled` so the toggle and the launch check
     /// cannot disagree about what "unset" means.
     @AppStorage(UpdateWatch.Keys.enabled) private var autoCheckUpdates = UpdateAvailability.defaultEnabled
+    /// Food tab: OFF lookup by name/barcode. Off by default, matching every other opt-in network path
+    /// (§1.1e) — the food library works fully offline with hand-entered items either way.
+    @AppStorage("foodOpenFoodFactsEnabled") private var openFoodFactsEnabled = false
     @Environment(\.openURL) private var openURL
 
     /// Whether the "Advanced" disclosure (Recovery, Test Centre, experimental probes, Backup &
@@ -2871,6 +2874,20 @@ struct SettingsView: View {
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
+
+                // Food tab: Open Food Facts lookup — the fifth opt-in network path (§1.1e). Off by
+                // default; the food library and meal log work fully offline either way.
+                Toggle(isOn: $openFoodFactsEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Look up foods online")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Text("When searching for a food or scanning a barcode in the Food tab, NOOP asks Open Food Facts (a free, independent product database) for a match. Only your search term or the scanned barcode is sent — nothing else about you or your data.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                    }
+                }
+                .tint(StrandPalette.accent)
 
                 // Project home — NOOP's code, releases, issues and wiki live on GitHub.
                 Link(destination: URL(string: "https://github.com/ryanbr/noop")!) {

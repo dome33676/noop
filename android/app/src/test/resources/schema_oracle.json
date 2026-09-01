@@ -42,7 +42,8 @@
     "v38-apple-step-hour",
     "v39-ppg-burst-index",
     "v40-daily-skin-temp-absolute",
-    "v41-drop-raw-imu-sample"
+    "v41-drop-raw-imu-sample",
+    "v42-food-tracking"
   ],
   "divergenceReasons": {
     "android-orphan-synced-column": "REAL COLUMN DRIFT: `synced` exists on Android only. GRDB's v10 note is explicit that stepSample gets no `synced` column ('unused; see StreamStore'), and v12's ppgHrSample never had one either; the Room entities copied the flag from the older per-second entities. Nothing reads it on Android — the per-row upload flag belongs to an upload path that does not exist there — so it is dead width, not divergent data. Removing it needs a Room table rebuild.",
@@ -563,6 +564,79 @@
       ],
       "indices": []
     },
+    "foodItem": {
+      "platform": "ios_only",
+      "reason": "Food-tracking library (v42). Android has no counterpart yet — the Food tab is iOS-only for now.",
+      "columns": [
+        {
+          "name": "id",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "deviceId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "name",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "kcalPer100g",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "proteinPer100g",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "carbsPer100g",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "fatPer100g",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "barcode",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "createdAt",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "indices": [
+        {
+          "name": "idx_foodItem_device_name",
+          "unique": false,
+          "columns": [
+            "deviceId",
+            "name"
+          ]
+        }
+      ]
+    },
     "gravitySample": {
       "platform": "both",
       "columns": [
@@ -918,6 +992,74 @@
         "startTs"
       ],
       "indices": []
+    },
+    "mealEntry": {
+      "platform": "ios_only",
+      "reason": "Food-tracking meal log (v42). Android has no counterpart yet — the Food tab is iOS-only for now.",
+      "columns": [
+        {
+          "name": "id",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "deviceId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "foodItemId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "day",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "mealType",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "quantityGrams",
+          "affinity": "REAL",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "loggedAt",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "indices": [
+        {
+          "name": "idx_mealEntry_device_day",
+          "unique": false,
+          "columns": [
+            "deviceId",
+            "day"
+          ]
+        },
+        {
+          "name": "idx_mealEntry_foodItem",
+          "unique": false,
+          "columns": [
+            "foodItemId"
+          ]
+        }
+      ]
     },
     "metricSeries": {
       "platform": "both",

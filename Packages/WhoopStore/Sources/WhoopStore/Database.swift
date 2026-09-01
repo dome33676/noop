@@ -883,6 +883,47 @@ extension WhoopStore {
         migrator.registerMigration("v41-drop-raw-imu-sample") { db in
             try db.drop(table: "rawImuSample")
         }
+        // v42: Food tracking — a user-maintained food/ingredient library plus a per-day meal log.
+        // `foodItem` is the reusable library (macros per 100g, optionally seeded from an Open Food
+        // Facts lookup and then user-editable); `mealEntry` is the log, one row per logged
+        // quantity of a food item on a day, referencing `foodItem.id` (no FK constraint — this
+        // schema is deliberately flat everywhere else, see `workout`/`labMarker`). `id` on both is a
+        // client-generated stable identifier (edit/delete-by-id, backup round-trips), matching the
+        // `labMarker` convention. `deviceId` is fixed to `WhoopStore.foodLogSourceId` ("food-log") on
+        // every row — there's no real per-strap scoping for hand-entered nutrition, but every other
+        // native (non-imported) table carries a constant deviceId this way (e.g. journal's
+        // "noop-journal"), so backup/restore and the metricSeries projection stay consistent with
+        // that convention.
+        migrator.registerMigration("v42-food-tracking") { db in
+            try db.create(table: "foodItem") { t in
+                t.column("id", .text).primaryKey()
+                t.column("deviceId", .text).notNull()
+                t.column("name", .text).notNull()
+                t.column("kcalPer100g", .double)
+                t.column("proteinPer100g", .double)
+                t.column("carbsPer100g", .double)
+                t.column("fatPer100g", .double)
+                t.column("barcode", .text)
+                t.column("createdAt", .integer).notNull()
+            }
+            try db.create(index: "idx_foodItem_device_name",
+                          on: "foodItem", columns: ["deviceId", "name"])
+            try db.create(table: "mealEntry") { t in
+                t.column("id", .text).primaryKey()
+                t.column("deviceId", .text).notNull()
+                t.column("foodItemId", .text).notNull()
+                t.column("day", .text).notNull()               // yyyy-MM-dd
+                t.column("mealType", .text).notNull()          // breakfast|lunch|dinner|snack
+                t.column("quantityGrams", .double).notNull()
+                t.column("loggedAt", .integer).notNull()       // epoch seconds
+            }
+            // Day-diary reads scan (deviceId, day) then walk loggedAt in order.
+            try db.create(index: "idx_mealEntry_device_day",
+                          on: "mealEntry", columns: ["deviceId", "day"])
+            // Lets a food-item edit/delete find (and re-project) every entry that references it.
+            try db.create(index: "idx_mealEntry_foodItem",
+                          on: "mealEntry", columns: ["foodItemId"])
+        }
         return migrator
     }
 }
