@@ -28,6 +28,10 @@ struct FoodItemEditorSheet: View {
     @State private var offResults: [OpenFoodFactsClient.Product] = []
     @State private var offSearching = false
     @State private var offSearchTask: Task<Void, Never>?
+    #if os(iOS)
+    @State private var showScanner = false
+    @State private var scanNotFound = false
+    #endif
 
     private enum NumberField: Hashable { case kcal, protein, carbs, fat }
     @FocusState private var focusedField: NumberField?
@@ -68,8 +72,28 @@ struct FoodItemEditorSheet: View {
         .noopSheetPresentation(largeFirst: true)
         .background(NoopChromeSurface())
         .keyboardDoneToolbar($focusedField)
+        .sheet(isPresented: $showScanner) {
+            BarcodeScannerScreen { code in
+                Task { await lookupBarcode(code) }
+            }
+        }
+        .alert("No match found", isPresented: $scanNotFound) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Open Food Facts has no product for that barcode. You can still enter it by hand.")
+        }
         #endif
     }
+
+    #if os(iOS)
+    private func lookupBarcode(_ code: String) async {
+        guard let product = await OpenFoodFactsClient.lookup(barcode: code) else {
+            scanNotFound = true
+            return
+        }
+        apply(product)
+    }
+    #endif
 
     private var formContent: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space5) {
@@ -116,6 +140,19 @@ struct FoodItemEditorSheet: View {
                     .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
                     .onChangeCompat(of: offQuery) { newValue in scheduleSearch(newValue) }
                 if offSearching { ProgressView().controlSize(.small) }
+                #if os(iOS)
+                Button {
+                    showScanner = true
+                } label: {
+                    Image(systemName: "barcode.viewfinder")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(StrandPalette.accent)
+                        .frame(width: 38, height: 38)
+                        .background(StrandPalette.surfaceInset, in: inputShape)
+                        .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                }
+                .accessibilityLabel("Scan a barcode")
+                #endif
             }
             if !offResults.isEmpty {
                 VStack(spacing: 0) {

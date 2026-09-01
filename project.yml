@@ -285,6 +285,10 @@ targets:
         NSHealthShareUsageDescription: "NOOP reads your own Apple Health data on-device to compute recovery, strain, and sleep. Nothing leaves your device."
         NSHealthUpdateUsageDescription: "NOOP writes the metrics it computes from your strap back into Apple Health, on-device and only when you allow it."
         NSMotionUsageDescription: "NOOP reads your iPhone's step count for a walking or running workout to show steps in the activity summary. It stays on your device. Nothing leaves it."
+        # Food tab: scan a barcode to look it up (opt-in, only when Open Food Facts lookup is enabled
+        # in Settings, §1.1e). The camera feed itself never leaves the device — only the recognized
+        # barcode number is sent, to Open Food Facts.
+        NSCameraUsageDescription: "NOOP uses the camera to scan a food barcode when looking it up in the Food tab. The camera feed stays on your device — only the barcode number is sent, and only when you've enabled online food lookup."
         # #187: the opt-in AI Coach's "Custom (OpenAI-compatible)" provider can point at a LOCAL LLM on
         # the LAN (Ollama / LM Studio at http://192.168.x.x:11434). ATS blocks cleartext by default;
         # NSAllowsLocalNetworking exempts loopback/.local/private-LAN hosts ONLY — public HTTPS endpoints
