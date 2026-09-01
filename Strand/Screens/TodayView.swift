@@ -398,6 +398,9 @@ struct TodayView: View {
     // iOS top-bar state: the date-jump popover and the profile/settings sheet.
     @State private var showDayPicker = false
     @State private var showSettings = false
+    /// "More" moved off the iOS tab bar (freeing its slot for Training) and lives here instead, next
+    /// to the strap-status area — iOS-only, macOS's sidebar already lists every destination directly.
+    @State private var showMoreIndex = false
     @State private var showLiveSession = false
     /// The Updates inbox sheet (opened by the header bell). Shared across both platforms.
     @State private var showUpdatesInbox = false
@@ -1262,6 +1265,17 @@ struct TodayView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Quick actions")
                 .accessibilityHint("Start a workout, log your journal, or breathe")
+                // "More" moved here from the tab bar (freed its slot for Training) — everything the old
+                // More tab listed is still one tap away, just from the header instead.
+                Button { showMoreIndex = true } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("More")
                 // Menu (Settings), the avatar, same 36 size.
                 Button { showSettings = true } label: {
                     ProfileAvatarView(imageData: profile.avatarImageData, size: 36)
@@ -1484,6 +1498,7 @@ struct TodayView: View {
         #else
         // Profile/settings from the top-bar button.
         .sheet(isPresented: $showSettings) { settingsSheet }
+        .sheet(isPresented: $showMoreIndex) { MoreIndexView() }
         #endif
         // The scoring guide, opened at a specific score from its ⓘ.
         .sheet(item: $guideSection) { section in

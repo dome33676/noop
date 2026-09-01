@@ -43,7 +43,8 @@
     "v39-ppg-burst-index",
     "v40-daily-skin-temp-absolute",
     "v41-drop-raw-imu-sample",
-    "v42-food-tracking"
+    "v42-food-tracking",
+    "v43-strength-training"
   ],
   "divergenceReasons": {
     "android-orphan-synced-column": "REAL COLUMN DRIFT: `synced` exists on Android only. GRDB's v10 note is explicit that stepSample gets no `synced` column ('unused; see StreamStore'), and v12's ppgHrSample never had one either; the Room entities copied the flag from the older per-second entities. Nothing reads it on Android — the per-row upload flag belongs to an upload path that does not exist there — so it is dead width, not divergent data. Removing it needs a Room table rebuild.",
@@ -1838,6 +1839,149 @@
         "ts"
       ],
       "indices": []
+    },
+    "strengthSession": {
+      "platform": "ios_only",
+      "reason": "Strength-training sessions (v43). Android has no counterpart yet — the Training tab is iOS-only for now.",
+      "columns": [
+        {
+          "name": "id",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "deviceId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "name",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "startTs",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "endTs",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "notes",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "indices": [
+        {
+          "name": "idx_strengthSession_device_start",
+          "unique": false,
+          "columns": [
+            "deviceId",
+            "startTs"
+          ]
+        }
+      ]
+    },
+    "strengthSet": {
+      "platform": "ios_only",
+      "reason": "Strength-training logged sets (v43). Android has no counterpart yet — the Training tab is iOS-only for now.",
+      "columns": [
+        {
+          "name": "id",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "deviceId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "sessionId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "exerciseName",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "setIndex",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "reps",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "weightKg",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "setDurationS",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "restBeforeS",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "completedAt",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "indices": [
+        {
+          "name": "idx_strengthSet_device_exercise",
+          "unique": false,
+          "columns": [
+            "deviceId",
+            "exerciseName",
+            "completedAt"
+          ]
+        },
+        {
+          "name": "idx_strengthSet_device_session",
+          "unique": false,
+          "columns": [
+            "deviceId",
+            "sessionId"
+          ]
+        }
+      ]
     },
     "workout": {
       "platform": "both",

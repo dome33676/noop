@@ -74,6 +74,12 @@ struct LiquidTodayView: View {
     @State private var guideSection: ScoreSection?
     @State private var customizationDestination: TodayCustomizationDestination?
     @State private var showSettings = false
+    #if os(iOS)
+    /// "More" moved off the iOS tab bar (freeing its slot for Training) and lives here instead, next
+    /// to the device-status button. macOS has no "More" concept — its sidebar already lists every
+    /// destination directly, so this stays iOS-only.
+    @State private var showMoreIndex = false
+    #endif
     @State private var synthesisExpanded = false
     @State private var showLiveSession = false
 
@@ -417,6 +423,11 @@ struct LiquidTodayView: View {
                     .liquidSheetDoneChrome { showSettings = false }
             }
         }
+        #if os(iOS)
+        .sheet(isPresented: $showMoreIndex) {
+            MoreIndexView()
+        }
+        #endif
         // Live Session (silent guardian, beta): the in-session screen owns the whole display — full
         // screen on iOS (nothing should compete with the ring mid-workout), a sheet on macOS where
         // fullScreenCover doesn't exist.
@@ -542,6 +553,21 @@ struct LiquidTodayView: View {
                     .accessibilityLabel("Profile and settings")
                     LiquidAddButton()
                     LiquidBatteryButton()
+                    #if os(iOS)
+                    // "More" moved here from the tab bar (freed its slot for Training) — everything the
+                    // old More tab listed is still one tap away, just from the header instead.
+                    Button { showMoreIndex = true } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(StrandPalette.textPrimary)
+                            .frame(
+                                width: NoopMetrics.compactControlSize,
+                                height: NoopMetrics.compactControlSize
+                            )
+                    }
+                    .nativeLiquidGlassHeaderButton()
+                    .accessibilityLabel("More")
+                    #endif
                     // One entry point for section order/visibility and both nested card editors.
                     Button { customizationDestination = .today } label: {
                         Image(systemName: "slider.horizontal.3")

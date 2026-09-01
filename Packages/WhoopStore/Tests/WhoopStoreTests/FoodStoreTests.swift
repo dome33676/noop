@@ -47,7 +47,7 @@ final class FoodStoreTests: XCTestCase {
     }
 
     func testSchemaVersionIs19() {
-        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 19)
+        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 20)
     }
 
     // MARK: - helpers

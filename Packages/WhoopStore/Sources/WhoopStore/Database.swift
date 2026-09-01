@@ -924,6 +924,41 @@ extension WhoopStore {
             try db.create(index: "idx_mealEntry_foodItem",
                           on: "mealEntry", columns: ["foodItemId"])
         }
+        // v43: Strength training — a session ("Training") plus the sets logged within it. `exerciseName`
+        // is free text (a suggestion catalog lives at the app layer, matching the `sport` column's
+        // convention on `workout`) rather than a foreign key, so this schema stays flat like every other
+        // table here. `deviceId` is fixed to `WhoopStore.strengthLogSourceId` ("strength-log") on every
+        // row, matching the `foodLogSourceId`/journal convention for hand-entered, non-strap data.
+        migrator.registerMigration("v43-strength-training") { db in
+            try db.create(table: "strengthSession") { t in
+                t.column("id", .text).primaryKey()
+                t.column("deviceId", .text).notNull()
+                t.column("name", .text).notNull()
+                t.column("startTs", .integer).notNull()
+                t.column("endTs", .integer)             // nil while the session is active
+                t.column("notes", .text)
+            }
+            try db.create(index: "idx_strengthSession_device_start",
+                          on: "strengthSession", columns: ["deviceId", "startTs"])
+            try db.create(table: "strengthSet") { t in
+                t.column("id", .text).primaryKey()
+                t.column("deviceId", .text).notNull()
+                t.column("sessionId", .text).notNull()
+                t.column("exerciseName", .text).notNull()
+                t.column("setIndex", .integer).notNull()      // order within (sessionId, exerciseName)
+                t.column("reps", .integer)
+                t.column("weightKg", .double)
+                t.column("setDurationS", .double)              // double-tap-start to double-tap-end
+                t.column("restBeforeS", .double)                // rest since the previous set ended
+                t.column("completedAt", .integer).notNull()    // epoch seconds
+            }
+            // Session-detail reads scan (deviceId, sessionId) then walk setIndex/completedAt in order.
+            try db.create(index: "idx_strengthSet_device_session",
+                          on: "strengthSet", columns: ["deviceId", "sessionId"])
+            // The per-exercise progression chart scans (deviceId, exerciseName) then walks completedAt.
+            try db.create(index: "idx_strengthSet_device_exercise",
+                          on: "strengthSet", columns: ["deviceId", "exerciseName", "completedAt"])
+        }
         return migrator
     }
 }

@@ -156,6 +156,11 @@ final class AppModel: ObservableObject {
     let stressNudgeCenter = StressNudgeCenter()
 
     private var lastDoubleTapAt: Date = .distantPast
+    /// Set by an active Strength Training session to temporarily hijack the physical double-tap
+    /// gesture for set start/stop instead of the user's configured `doubleTapAction`. `handleDoubleTap()`
+    /// calls this first; a `true` return means it handled the tap, so the normal `runMacAction` dispatch
+    /// is skipped. nil (the default) leaves double-tap behaving exactly as configured everywhere else.
+    var doubleTapInterceptor: (() -> Bool)?
     private var lastCoachZone: Int = -1
     // L3 stress-onset detector state: a rolling R-R buffer + the replay-safe detector state (persisted
     // via BiofeedbackPrefs so a relaunch can't re-fire), carried verbatim between evaluations.
@@ -1521,6 +1526,7 @@ final class AppModel: ObservableObject {
         let now = Date()
         guard now.timeIntervalSince(lastDoubleTapAt) > 1.2 else { return }   // debounce repeats
         lastDoubleTapAt = now
+        if let interceptor = doubleTapInterceptor, interceptor() { return }
         live.append(log: "Double-tap → \(behavior.doubleTapAction.label)")
         runMacAction(behavior.doubleTapAction, shortcut: behavior.doubleTapShortcut)
     }

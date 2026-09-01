@@ -1,0 +1,275 @@
+import SwiftUI
+import StrandDesign
+import WhoopStore
+
+// MARK: - Active training screen
+//
+// One running session: elapsed-time header (TimelineView, matching LiveWorkoutView's convention),
+// an exercise chip row, the active exercise's set/rest timer with a big Start/End Set control, and
+// the sets already logged. While this screen is visible it hijacks the strap's physical double-tap
+// (via `AppModel.doubleTapInterceptor`) to start/end a set instead of the user's configured
+// double-tap action — cleared the moment the screen goes away, so every other screen is unaffected.
+
+struct ActiveTrainingView: View {
+    @EnvironmentObject private var repo: Repository
+    @EnvironmentObject private var model: AppModel
+    @StateObject private var controller: ActiveTrainingController
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var showAddExercise = false
+    @State private var showEndConfirm = false
+
+    /// `repo`/`model` are read from the caller's own `@EnvironmentObject`s and passed through
+    /// explicitly — environment values aren't available inside a custom `init`, and `@StateObject`
+    /// needs the controller constructed with them up front.
+    init(session: StrengthSessionRow, repo: Repository, model: AppModel) {
+        _controller = StateObject(wrappedValue: ActiveTrainingController(session: session, repo: repo, model: model))
+    }
+
+    var body: some View {
+        // This screen is presented full-screen (not pushed), so it needs its own NavigationStack for
+        // the in-content "view progression" NavigationLink to render enabled rather than orphaned.
+        NavigationStack {
+            content
+        }
+    }
+
+    private var content: some View {
+        ScreenScaffold(title: controller.session.name, subtitle: "Training in progress") {
+            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                elapsedHeader
+                exerciseChips
+                if let exercise = controller.selectedExercise {
+                    activeExerciseCard(exercise)
+                } else {
+                    NoopCard {
+                        Text("Add an exercise to start logging sets.")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                    }
+                }
+                NoopButton("End Training", systemImage: "flag.checkered", kind: .secondary, fullWidth: true) {
+                    showEndConfirm = true
+                }
+            }
+        }
+        .task { await controller.load() }
+        .onAppear { model.doubleTapInterceptor = { [weak controller] in controller?.toggleSet() ?? false } }
+        .onDisappear { model.doubleTapInterceptor = nil }
+        .sheet(isPresented: $showAddExercise) {
+            ExercisePickerSheet { name in controller.addExercise(name) }
+        }
+        .sheet(item: $controller.pendingSet) { pending in
+            LogSetSheet(pending: pending) { reps, weightKg in
+                Task { await controller.confirmPendingSet(reps: reps, weightKg: weightKg) }
+            } onCancel: {
+                controller.discardPendingSet()
+            }
+        }
+        .confirmationDialog("End this training?", isPresented: $showEndConfirm, titleVisibility: .visible) {
+            Button("End Training", role: .destructive) {
+                Task { await controller.endTraining(); dismiss() }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    // MARK: - Header clock
+
+    private var elapsedHeader: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let elapsed = ActiveWorkoutClock.activeElapsed(
+                start: Date(timeIntervalSince1970: TimeInterval(controller.session.startTs)),
+                pausedAt: nil, pausedDuration: 0, now: context.date
+            )
+            Text(ActiveWorkoutClock.clock(Int(elapsed)))
+                .font(StrandFont.rounded(40, weight: .bold))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .center)
+                .accessibilityLabel("Training duration")
+        }
+    }
+
+    // MARK: - Exercise chips
+
+    private var exerciseChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(controller.exerciseNames, id: \.self) { name in
+                    Button { controller.selectedExercise = name } label: {
+                        Text(name)
+                            .font(StrandFont.subhead.weight(name == controller.selectedExercise ? .bold : .regular))
+                            .foregroundStyle(name == controller.selectedExercise
+                                             ? StrandPalette.textPrimary : StrandPalette.textSecondary)
+                            .padding(.horizontal, 14).padding(.vertical, 8)
+                            .background(
+                                name == controller.selectedExercise ? StrandPalette.accent.opacity(0.18)
+                                                                    : StrandPalette.surfaceInset,
+                                in: Capsule()
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button { showAddExercise = true } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(StrandPalette.accent)
+                        .frame(width: 36, height: 36)
+                        .background(StrandPalette.surfaceInset, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Add exercise")
+            }
+        }
+    }
+
+    // MARK: - Active exercise card
+
+    private func activeExerciseCard(_ exercise: String) -> some View {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                HStack {
+                    Text(exercise).strandOverline()
+                    Spacer()
+                    NavigationLink {
+                        ExerciseProgressionView(exerciseName: exercise)
+                    } label: {
+                        Image(systemName: "chart.line.uptrend.xyaxis")
+                            .foregroundStyle(StrandPalette.accent)
+                    }
+                    .accessibilityLabel("View progression for \(exercise)")
+                }
+                setTimer(exercise)
+                NoopButton(
+                    controller.setStartedAt != nil ? "End Set" : "Start Set",
+                    systemImage: controller.setStartedAt != nil ? "stop.fill" : "play.fill",
+                    kind: controller.setStartedAt != nil ? .secondary : .primary,
+                    fullWidth: true
+                ) {
+                    controller.toggleSet()
+                }
+                Text("Double-tap your strap to do the same — your usual double-tap action is paused while this screen is open.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                let logged = controller.sets(for: exercise)
+                if !logged.isEmpty {
+                    Divider().opacity(0.4)
+                    VStack(spacing: 0) {
+                        ForEach(Array(logged.enumerated()), id: \.element.id) { idx, set in
+                            setRow(set, index: idx)
+                            if idx < logged.count - 1 { Divider().opacity(0.3) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func setTimer(_ exercise: String) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let (label, seconds): (String, Int) = {
+                if let startedAt = controller.setStartedAt {
+                    return ("Set time", Int(context.date.timeIntervalSince(startedAt)))
+                } else if let lastEnd = controller.lastSetEndedAt(for: exercise) {
+                    return ("Rest", Int(context.date.timeIntervalSince(lastEnd)))
+                } else {
+                    return ("Ready", 0)
+                }
+            }()
+            HStack {
+                Text(label).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                Spacer()
+                Text(ActiveWorkoutClock.clock(seconds))
+                    .font(StrandFont.rounded(28, weight: .semibold))
+                    .foregroundStyle(controller.setStartedAt != nil ? StrandPalette.accent : StrandPalette.textPrimary)
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    private func setRow(_ set: StrengthSetRow, index: Int) -> some View {
+        HStack {
+            Text("Set \(index + 1)")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textTertiary)
+            Spacer()
+            if let reps = set.reps, let weight = set.weightKg {
+                Text("\(reps) × \(String(format: "%.1f", weight)) kg")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textPrimary)
+            } else if let reps = set.reps {
+                Text("\(reps) reps")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textPrimary)
+            }
+            Button(role: .destructive) {
+                Task { await controller.deleteSet(set) }
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Exercise picker (catalog + free text, mirrors LogMealSheet's food picker)
+
+private struct ExercisePickerSheet: View {
+    let onPick: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var results: [ExerciseCatalog.Exercise] { ExerciseCatalog.matching(query) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space5) {
+            Text("Add Exercise")
+                .font(StrandFont.title2)
+                .foregroundStyle(StrandPalette.textPrimary)
+            TextField("e.g. Bench Press", text: $query)
+                .textFieldStyle(.plain)
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .padding(.horizontal, 12).padding(.vertical, 9)
+                .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(results) { exercise in
+                        Button { onPick(exercise.name); dismiss() } label: {
+                            Text(exercise.name)
+                                .font(StrandFont.body)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if !query.trimmingCharacters(in: .whitespaces).isEmpty,
+                       ExerciseCatalog.exercise(named: query) == nil {
+                        Button { onPick(query); dismiss() } label: {
+                            Label("Use \"\(query)\"", systemImage: "plus")
+                                .font(StrandFont.body)
+                                .foregroundStyle(StrandPalette.accent)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            NoopButton("Cancel", kind: .tertiary, fullWidth: true) { dismiss() }
+        }
+        .padding(NoopMetrics.space6)
+        .frame(maxWidth: .infinity)
+        .background(NoopChromeSurface())
+        #if os(iOS)
+        .noopSheetPresentation(largeFirst: false)
+        #endif
+    }
+}

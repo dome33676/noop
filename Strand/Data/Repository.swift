@@ -2604,6 +2604,75 @@ final class Repository: ObservableObject {
         _ = try? await store.deleteMealEntry(id: id)
     }
 
+    // MARK: - Strength training
+
+    /// Sessions in the last `days`, newest first.
+    func strengthSessions(days: Int = 365) async -> [StrengthSessionRow] {
+        guard let store = await ensureStore() else { return [] }
+        let now = Int(Date().timeIntervalSince1970)
+        let from = now - days * 86_400
+        return (try? await store.strengthSessions(deviceId: WhoopStore.strengthLogSourceId,
+                                                   from: from, to: now + 86_400)) ?? []
+    }
+
+    /// Create or edit (by re-passing the same `id`) one training session.
+    func saveStrengthSession(_ session: StrengthSessionRow) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.upsertStrengthSession(session)
+    }
+
+    func deleteStrengthSession(id: String) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.deleteStrengthSession(id: id)
+    }
+
+    /// Sets logged within one session, oldest first.
+    func strengthSets(sessionId: String) async -> [StrengthSetRow] {
+        guard let store = await ensureStore() else { return [] }
+        return (try? await store.strengthSets(deviceId: WhoopStore.strengthLogSourceId,
+                                              sessionId: sessionId)) ?? []
+    }
+
+    /// Every logged set for one exercise across all sessions, oldest first — the progression chart's
+    /// source data.
+    func strengthSets(exerciseName: String) async -> [StrengthSetRow] {
+        guard let store = await ensureStore() else { return [] }
+        return (try? await store.strengthSets(deviceId: WhoopStore.strengthLogSourceId,
+                                              exerciseName: exerciseName)) ?? []
+    }
+
+    /// Log (or edit, by re-passing the same `id`) one set.
+    func logStrengthSet(_ set: StrengthSetRow) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.logStrengthSet(set)
+    }
+
+    func deleteStrengthSet(id: String) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.deleteStrengthSet(id: id)
+    }
+
+    /// All-time distinct exercise names the user has actually logged, most-recently-used first —
+    /// surfaced above the static catalogue in the exercise picker so a workout the user does often
+    /// (even one not in `ExerciseCatalog`) is one tap away.
+    func recentStrengthExerciseNames(limit: Int = 20) async -> [String] {
+        guard let store = await ensureStore() else { return [] }
+        let sessions = (try? await store.strengthSessions(deviceId: WhoopStore.strengthLogSourceId,
+                                                           from: 0, to: Int(Date().timeIntervalSince1970) + 86_400)) ?? []
+        var seen = Set<String>()
+        var names: [String] = []
+        for session in sessions {
+            let sets = (try? await store.strengthSets(deviceId: WhoopStore.strengthLogSourceId,
+                                                       sessionId: session.id)) ?? []
+            for set in sets.reversed() where !seen.contains(set.exerciseName) {
+                seen.insert(set.exerciseName)
+                names.append(set.exerciseName)
+                if names.count >= limit { return names }
+            }
+        }
+        return names
+    }
+
     /// All workouts (Whoop + Apple Health + on-device detected bouts), newest first.
     ///
     /// Detected bouts are surfaced with an honest "Detected" badge so the user can see , and
