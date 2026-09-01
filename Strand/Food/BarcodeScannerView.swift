@@ -1,6 +1,7 @@
 #if os(iOS)
 import SwiftUI
 import VisionKit
+import StrandDesign
 
 // MARK: - Barcode scanner (iOS only — VisionKit's live scanner has no macOS counterpart)
 //
