@@ -190,12 +190,21 @@ jobs:
           DATE=$(date -u +%Y-%m-%d)
           SHA="${GITHUB_SHA:0:7}"
           REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+          # AltStore/SideStore decide "is there an update" by comparing the VERSION STRING to what's
+          # installed, not buildVersion (that's display-only) — and the app's own MARKETING_VERSION
+          # (e.g. "10.6.1") does NOT bump on every CI run, only on an intentional release. Appending a
+          # 4th numeric component (YYMMDDHHMM, always increasing) makes THIS SOURCE's version compare
+          # as newer than the plain 3-part version every already-installed build carries, on every run,
+          # without touching the app's own MARKETING_VERSION.
+          FOURTH="$(date -u +%y%m%d%H%M)"
+          SOURCE_VERSION="${VER}.${FOURTH}"
           cat > altstore-source.json <<JSON
           {
             "name": "NOOP (fork testing)",
             "identifier": "com.noopapp.noop.altstore.staging",
             "sourceURL": "${REPO_URL}/releases/download/testing-latest/altstore-source.json",
             "subtitle": "Rolling testing builds — refreshed on every CI run.",
+            "description": "Rolling testing-build source for this fork of NOOP. Refreshed on every CI run so AltStore/SideStore always offers the newest build as an in-place update — no manual delete-and-reinstall.",
             "iconURL": "${REPO_URL}/raw/main/Strand/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512.png",
             "website": "${REPO_URL}",
             "tintColor": "44E2B0",
@@ -210,9 +219,15 @@ jobs:
                 "tintColor": "44E2B0",
                 "category": "healthcare-fitness",
                 "screenshotURLs": [],
+                "version": "${SOURCE_VERSION}",
+                "versionDate": "${DATE}",
+                "versionDescription": "Base app version ${VER}, built ${DATE} (${SHA}).",
+                "downloadURL": "${REPO_URL}/releases/download/testing-latest/${IPA}",
+                "size": ${SIZE},
+                "minOSVersion": "17.0",
                 "versions": [
                   {
-                    "version": "${VER}",
+                    "version": "${SOURCE_VERSION}",
                     "buildVersion": "${DATE}-${SHA}",
                     "date": "${DATE}",
                     "localizedDescription": "Base app version ${VER}, built ${DATE} (${SHA}).",
