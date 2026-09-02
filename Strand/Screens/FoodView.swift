@@ -64,9 +64,6 @@ struct FoodView: View {
                 macrosSection
                 if dayOffset == 0 { energyBalanceSection }
                 mealsSection
-                NoopButton("Log meal", systemImage: "plus", kind: .primary, fullWidth: true) {
-                    showLogSheet = true
-                }
             }
             .onChangeCompat(of: fraction) { newFraction in
                 withAnimation(.easeOut(duration: 0.9)) { heroFraction = newFraction }
@@ -74,6 +71,11 @@ struct FoodView: View {
             .onAppear {
                 withAnimation(.easeOut(duration: 0.9)) { heroFraction = fraction }
             }
+        }
+        // Pinned above the tab bar (not the last item in the scroll content) so it's always one tap
+        // away without scrolling — matches LiveWorkoutView's floating bottom control bar convention.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            logMealButton
         }
         .task(id: dayOffset) { await reload() }
         .sheet(isPresented: $showLogSheet) {
@@ -88,6 +90,20 @@ struct FoodView: View {
         }
         .sheet(isPresented: $showGoalsSheet) {
             FoodGoalsSheet(kcal: $goalKcal, protein: $goalProtein, carbs: $goalCarbs, fat: $goalFat)
+        }
+    }
+
+    // MARK: - Floating "Log meal" (pinned above the tab bar)
+
+    private var logMealButton: some View {
+        NoopButton("Log meal", systemImage: "plus", kind: .primary, fullWidth: true) {
+            showLogSheet = true
+        }
+        .padding(.horizontal, NoopMetrics.screenHPadding)
+        .padding(.top, NoopMetrics.space2)
+        .padding(.bottom, NoopMetrics.space2)
+        .background {
+            NoopPanelSurface(cornerRadius: 0, elevated: true).ignoresSafeArea(edges: .bottom)
         }
     }
 
