@@ -45,18 +45,20 @@ final class ActiveTrainingController: ObservableObject {
 
     func load() async {
         sets = await repo.strengthSets(sessionId: session.id)
-        // Distinct exercise names, first-appearance order (sets are already oldest-first).
+        // Distinct logged names, first-appearance order (sets are already oldest-first).
         var seen = Set<String>()
         let loggedNames = sets.map(\.exerciseName).filter { seen.insert($0).inserted }
-        if !loggedNames.isEmpty {
-            exerciseNames = loggedNames
-            if selectedExercise == nil { selectedExercise = exerciseNames.last }
-        } else if let template, exerciseNames.isEmpty {
-            // Fresh session started from a template, nothing logged yet: seed the exercise list (and
-            // pick the FIRST one, working order) from the plan instead of leaving it empty.
-            exerciseNames = template.plan.map(\.exerciseName)
-            if selectedExercise == nil { selectedExercise = exerciseNames.first }
-        }
+        // Union, not replace: start from the template's full plan (so an exercise with zero sets
+        // logged so far never disappears the moment a DIFFERENT exercise gets its first set — the
+        // previous version reassigned exerciseNames to just `loggedNames` here, which silently
+        // dropped every not-yet-started planned exercise from the chip row), keep anything the user
+        // already added manually (`addExercise`), then append any logged name not otherwise present
+        // (an ad-hoc exercise/extra addition).
+        var merged = template?.plan.map(\.exerciseName) ?? []
+        for name in exerciseNames where !merged.contains(name) { merged.append(name) }
+        for name in loggedNames where !merged.contains(name) { merged.append(name) }
+        exerciseNames = merged
+        if selectedExercise == nil { selectedExercise = exerciseNames.first }
     }
 
     func addExercise(_ name: String) {
@@ -84,6 +86,15 @@ final class ActiveTrainingController: ObservableObject {
         guard let plan = template.plan.first(where: { $0.exerciseName == exerciseName }),
               plan.sets.indices.contains(nextIndex) else { return nil }
         return plan.sets[nextIndex]
+    }
+
+    /// True once every planned set for this exercise has been logged. Always false without a
+    /// template (there's no target to be "done" against for a blank/ad-hoc exercise).
+    func isComplete(_ exerciseName: String) -> Bool {
+        guard let template,
+              let plan = template.plan.first(where: { $0.exerciseName == exerciseName }),
+              !plan.sets.isEmpty else { return false }
+        return sets(for: exerciseName).count >= plan.sets.count
     }
 
     /// A short "Set 2 of 3 — target 10 reps @ 60 kg" style hint for the active-exercise card, nil
@@ -147,9 +158,13 @@ final class ActiveTrainingController: ObservableObject {
         return true
     }
 
-    /// Confirms a just-ended set with the reps/weight the user entered, then reloads.
-    func confirmPendingSet(reps: Int?, weightKg: Double?) async {
-        guard let pending = pendingSet else { return }
+    /// Confirms a just-ended set with the reps/weight the user entered, then reloads. Takes the
+    /// `PendingSet` explicitly rather than re-reading `self.pendingSet` — `LogSetSheet`'s own Save
+    /// button calls `dismiss()` right after kicking off this call, and for an `item`-bound sheet that
+    /// dismiss nils out the bound `pendingSet` on the same actor turn; re-reading `pendingSet` here
+    /// races that nil-out and can see it already cleared, silently dropping the set (the bug behind
+    /// "set 2 never gets logged, the plan stays stuck offering set 1 forever").
+    func confirmPendingSet(_ pending: PendingSet, reps: Int?, weightKg: Double?) async {
         pendingSet = nil
         let row = StrengthSetRow(
             id: UUID().uuidString, deviceId: WhoopStore.strengthLogSourceId, sessionId: session.id,

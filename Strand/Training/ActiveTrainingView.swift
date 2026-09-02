@@ -62,7 +62,7 @@ struct ActiveTrainingView: View {
         }
         .sheet(item: $controller.pendingSet) { pending in
             LogSetSheet(pending: pending) { reps, weightKg in
-                Task { await controller.confirmPendingSet(reps: reps, weightKg: weightKg) }
+                Task { await controller.confirmPendingSet(pending, reps: reps, weightKg: weightKg) }
             } onCancel: {
                 controller.discardPendingSet()
             }
@@ -99,16 +99,23 @@ struct ActiveTrainingView: View {
             HStack(spacing: 8) {
                 ForEach(controller.exerciseNames, id: \.self) { name in
                     Button { controller.selectedExercise = name } label: {
-                        Text(name)
-                            .font(StrandFont.subhead.weight(name == controller.selectedExercise ? .bold : .regular))
-                            .foregroundStyle(name == controller.selectedExercise
-                                             ? StrandPalette.textPrimary : StrandPalette.textSecondary)
-                            .padding(.horizontal, 14).padding(.vertical, 8)
-                            .background(
-                                name == controller.selectedExercise ? StrandPalette.accent.opacity(0.18)
-                                                                    : StrandPalette.surfaceInset,
-                                in: Capsule()
-                            )
+                        HStack(spacing: 4) {
+                            if controller.isComplete(name) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(StrandPalette.statusPositive)
+                            }
+                            Text(name)
+                                .font(StrandFont.subhead.weight(name == controller.selectedExercise ? .bold : .regular))
+                                .foregroundStyle(name == controller.selectedExercise
+                                                 ? StrandPalette.textPrimary : StrandPalette.textSecondary)
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(
+                            name == controller.selectedExercise ? StrandPalette.accent.opacity(0.18)
+                                                                : StrandPalette.surfaceInset,
+                            in: Capsule()
+                        )
                     }
                     .buttonStyle(.plain)
                 }
@@ -132,6 +139,11 @@ struct ActiveTrainingView: View {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 HStack {
                     Text(exercise).strandOverline()
+                    if controller.isComplete(exercise) {
+                        Label("Completed", systemImage: "checkmark.circle.fill")
+                            .font(StrandFont.footnote.weight(.semibold))
+                            .foregroundStyle(StrandPalette.statusPositive)
+                    }
                     Spacer()
                     NavigationLink {
                         ExerciseProgressionView(exerciseName: exercise)
@@ -145,6 +157,10 @@ struct ActiveTrainingView: View {
                     Text(hint)
                         .font(StrandFont.footnote.weight(.medium))
                         .foregroundStyle(StrandPalette.accent)
+                } else if controller.isComplete(exercise) {
+                    Text("All planned sets logged. Starting another set adds an extra one.")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
                 }
                 setTimer(exercise)
                 NoopButton(
