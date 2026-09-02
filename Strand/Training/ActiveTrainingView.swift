@@ -195,7 +195,7 @@ struct ActiveTrainingView: View {
 
     private func setTimer(_ exercise: String) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            controller.checkRestBuzz(for: exercise, now: context.date)
+            let _: Void = controller.checkRestBuzz(for: exercise, now: context.date)
             let (label, seconds): (String, Int) = {
                 if let startedAt = controller.setStartedAt {
                     return ("Set time", Int(context.date.timeIntervalSince(startedAt)))
