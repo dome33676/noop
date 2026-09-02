@@ -21,9 +21,10 @@ struct ActiveTrainingView: View {
 
     /// `repo`/`model` are read from the caller's own `@EnvironmentObject`s and passed through
     /// explicitly — environment values aren't available inside a custom `init`, and `@StateObject`
-    /// needs the controller constructed with them up front.
-    init(session: StrengthSessionRow, repo: Repository, model: AppModel) {
-        _controller = StateObject(wrappedValue: ActiveTrainingController(session: session, repo: repo, model: model))
+    /// needs the controller constructed with them up front. `template` is nil for a blank session.
+    init(session: StrengthSessionRow, repo: Repository, model: AppModel, template: StrengthTemplateRow? = nil) {
+        _controller = StateObject(wrappedValue: ActiveTrainingController(
+            session: session, repo: repo, model: model, template: template))
     }
 
     var body: some View {
@@ -140,6 +141,11 @@ struct ActiveTrainingView: View {
                     }
                     .accessibilityLabel("View progression for \(exercise)")
                 }
+                if let hint = controller.targetHint(for: exercise) {
+                    Text(hint)
+                        .font(StrandFont.footnote.weight(.medium))
+                        .foregroundStyle(StrandPalette.accent)
+                }
                 setTimer(exercise)
                 NoopButton(
                     controller.setStartedAt != nil ? "End Set" : "Start Set",
@@ -217,8 +223,9 @@ struct ActiveTrainingView: View {
 }
 
 // MARK: - Exercise picker (catalog + free text, mirrors LogMealSheet's food picker)
+// Not private: also used by TemplateEditorView.
 
-private struct ExercisePickerSheet: View {
+struct ExercisePickerSheet: View {
     let onPick: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""

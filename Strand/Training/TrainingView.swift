@@ -14,13 +14,42 @@ struct TrainingView: View {
     @State private var sessions: [StrengthSessionRow] = []
     @State private var loaded = false
     @State private var startedSession: StrengthSessionRow?
+    @State private var startedTemplate: StrengthTemplateRow?
+    @State private var showStartPicker = false
+    @AppStorage(ActiveTrainingController.robustDoubleTapKey) private var robustDoubleTap = false
 
     var body: some View {
         ScreenScaffold(title: "Training", subtitle: "Your strength sessions, on this device only.",
                        onRefresh: { await reload() }) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 NoopButton("Start Training", systemImage: "dumbbell.fill", kind: .primary, fullWidth: true) {
-                    startTraining()
+                    showStartPicker = true
+                }
+                NavigationLink {
+                    TemplateListView()
+                } label: {
+                    HStack {
+                        Image(systemName: "list.bullet.rectangle")
+                        Text("Manage Templates")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .padding(.horizontal, 4)
+                }
+                NoopCard {
+                    Toggle(isOn: $robustDoubleTap) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Less sensitive double-tap")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Text("Waits longer between taps and ignores an end-tap that arrives implausibly fast, so a hard rep is less likely to start/end a set by itself.")
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                        }
+                    }
+                    .tint(StrandPalette.accent)
                 }
                 if loaded && sessions.isEmpty {
                     NoopCard {
@@ -46,16 +75,21 @@ struct TrainingView: View {
             }
         }
         .task { await reload() }
+        .sheet(isPresented: $showStartPicker) {
+            StartTrainingSheet { template in
+                startTraining(from: template)
+            }
+        }
         // A just-started session is presented full-screen (matching the Live-session convention:
         // an in-progress session owns the whole display) rather than pushed — `.navigationDestination
         // (item:)` needs macOS 14, and this file compiles into the macOS 13 target too.
         #if os(iOS)
         .fullScreenCover(item: $startedSession) { session in
-            ActiveTrainingView(session: session, repo: repo, model: model)
+            ActiveTrainingView(session: session, repo: repo, model: model, template: startedTemplate)
         }
         #else
         .sheet(item: $startedSession) { session in
-            ActiveTrainingView(session: session, repo: repo, model: model)
+            ActiveTrainingView(session: session, repo: repo, model: model, template: startedTemplate)
         }
         #endif
     }
@@ -88,14 +122,15 @@ struct TrainingView: View {
         let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short; return f
     }()
 
-    private func startTraining() {
+    private func startTraining(from template: StrengthTemplateRow?) {
         let session = StrengthSessionRow(
             id: UUID().uuidString, deviceId: WhoopStore.strengthLogSourceId,
-            name: "Training — " + Self.dateFmt.string(from: Date()),
+            name: template?.name ?? "Training — " + Self.dateFmt.string(from: Date()),
             startTs: Int(Date().timeIntervalSince1970), endTs: nil, notes: nil
         )
         Task {
             await repo.saveStrengthSession(session)
+            startedTemplate = template
             startedSession = session
         }
     }
@@ -103,6 +138,55 @@ struct TrainingView: View {
     private func reload() async {
         sessions = await repo.strengthSessions()
         loaded = true
+    }
+}
+
+// MARK: - Start-training chooser (blank vs. a saved template)
+
+private struct StartTrainingSheet: View {
+    /// nil = start blank.
+    let onPick: (StrengthTemplateRow?) -> Void
+    @EnvironmentObject private var repo: Repository
+    @Environment(\.dismiss) private var dismiss
+    @State private var templates: [StrengthTemplateRow] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space5) {
+            Text("Start Training")
+                .font(StrandFont.title2)
+                .foregroundStyle(StrandPalette.textPrimary)
+            NoopButton("Start Blank", systemImage: "plus", kind: .secondary, fullWidth: true) {
+                onPick(nil); dismiss()
+            }
+            if !templates.isEmpty {
+                Text("Or from a template").strandOverline()
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(templates.enumerated()), id: \.element.id) { idx, template in
+                            Button { onPick(template); dismiss() } label: {
+                                HStack {
+                                    Text(template.name)
+                                        .font(StrandFont.body)
+                                        .foregroundStyle(StrandPalette.textPrimary)
+                                    Spacer()
+                                    Text("\(template.plan.count) exercise\(template.plan.count == 1 ? "" : "s")")
+                                        .font(StrandFont.footnote)
+                                        .foregroundStyle(StrandPalette.textTertiary)
+                                }
+                                .contentShape(Rectangle())
+                                .padding(.vertical, 10)
+                            }
+                            .buttonStyle(.plain)
+                            if idx < templates.count - 1 { Divider().opacity(0.3) }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(NoopMetrics.space6)
+        .frame(maxWidth: .infinity)
+        .background(NoopChromeSurface())
+        .task { templates = await repo.strengthTemplates() }
     }
 }
 

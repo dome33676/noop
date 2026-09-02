@@ -959,6 +959,23 @@ extension WhoopStore {
             try db.create(index: "idx_strengthSet_device_exercise",
                           on: "strengthSet", columns: ["deviceId", "exerciseName", "completedAt"])
         }
+        // v44: Strength training templates — a reusable plan (exercises + per-set rep/weight targets)
+        // the Training tab can start a session from. `planJSON` holds the whole plan as one blob
+        // (an ordered list of exercises, each with an ordered list of per-set targets), matching the
+        // `workout.zonesJSON` convention: this substructure is always read/written as a whole, so a
+        // second normalized table (with its own cascading-delete bookkeeping) buys nothing here.
+        migrator.registerMigration("v44-strength-templates") { db in
+            try db.create(table: "strengthTemplate") { t in
+                t.column("id", .text).primaryKey()
+                t.column("deviceId", .text).notNull()
+                t.column("name", .text).notNull()
+                t.column("planJSON", .text).notNull()
+                t.column("createdAt", .integer).notNull()
+                t.column("updatedAt", .integer).notNull()
+            }
+            try db.create(index: "idx_strengthTemplate_device",
+                          on: "strengthTemplate", columns: ["deviceId"])
+        }
         return migrator
     }
 }

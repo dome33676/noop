@@ -6,6 +6,10 @@ import WhoopStore
 /// LIVE state rather than a stale value-type snapshot from whichever render captured it.
 @MainActor
 final class ActiveTrainingController: ObservableObject {
+    /// UserDefaults key for the "less sensitive" double-tap toggle, read here and written by a
+    /// plain `@AppStorage` Toggle on `TrainingView` — kept as one shared key so both sides agree.
+    static let robustDoubleTapKey = "strengthRobustDoubleTap"
+
     @Published private(set) var session: StrengthSessionRow
     @Published private(set) var sets: [StrengthSetRow] = []
     @Published var exerciseNames: [String] = []
@@ -27,19 +31,32 @@ final class ActiveTrainingController: ObservableObject {
 
     private let repo: Repository
     private let model: AppModel
+    /// The template this session was started from, if any — seeds `exerciseNames`/per-set targets
+    /// and receives the actually-achieved values back when the training ends (see `endTraining()`).
+    private let template: StrengthTemplateRow?
+    private var lastToggleAt: Date = .distantPast
 
-    init(session: StrengthSessionRow, repo: Repository, model: AppModel) {
+    init(session: StrengthSessionRow, repo: Repository, model: AppModel, template: StrengthTemplateRow? = nil) {
         self.session = session
         self.repo = repo
         self.model = model
+        self.template = template
     }
 
     func load() async {
         sets = await repo.strengthSets(sessionId: session.id)
         // Distinct exercise names, first-appearance order (sets are already oldest-first).
         var seen = Set<String>()
-        exerciseNames = sets.map(\.exerciseName).filter { seen.insert($0).inserted }
-        if selectedExercise == nil { selectedExercise = exerciseNames.last }
+        let loggedNames = sets.map(\.exerciseName).filter { seen.insert($0).inserted }
+        if !loggedNames.isEmpty {
+            exerciseNames = loggedNames
+            if selectedExercise == nil { selectedExercise = exerciseNames.last }
+        } else if let template, exerciseNames.isEmpty {
+            // Fresh session started from a template, nothing logged yet: seed the exercise list (and
+            // pick the FIRST one, working order) from the plan instead of leaving it empty.
+            exerciseNames = template.plan.map(\.exerciseName)
+            if selectedExercise == nil { selectedExercise = exerciseNames.first }
+        }
     }
 
     func addExercise(_ name: String) {
@@ -59,29 +76,72 @@ final class ActiveTrainingController: ObservableObject {
         sets(for: exerciseName).last.map { Date(timeIntervalSince1970: TimeInterval($0.completedAt)) }
     }
 
+    /// The template's planned target for the NEXT set of `exerciseName` (i.e. set index
+    /// `sets(for: exerciseName).count`), if a template is active and still has a slot at that index.
+    func nextTarget(for exerciseName: String) -> TemplateSetPlan? {
+        guard let template else { return nil }
+        let nextIndex = sets(for: exerciseName).count
+        guard let plan = template.plan.first(where: { $0.exerciseName == exerciseName }),
+              plan.sets.indices.contains(nextIndex) else { return nil }
+        return plan.sets[nextIndex]
+    }
+
+    /// A short "Set 2 of 3 — target 10 reps @ 60 kg" style hint for the active-exercise card, nil
+    /// when there's no template (or the plan has no more slots for this exercise).
+    func targetHint(for exerciseName: String) -> String? {
+        guard let template,
+              let plan = template.plan.first(where: { $0.exerciseName == exerciseName }) else { return nil }
+        let nextIndex = sets(for: exerciseName).count
+        guard plan.sets.indices.contains(nextIndex) else { return nil }
+        let target = plan.sets[nextIndex]
+        var parts: [String] = []
+        if let reps = target.targetReps { parts.append("\(reps) reps") }
+        if let weight = target.targetWeightKg { parts.append(String(format: "%.1f kg", weight)) }
+        let targetText = parts.isEmpty ? "" : " — target \(parts.joined(separator: " @ "))"
+        return "Set \(nextIndex + 1) of \(plan.sets.count)\(targetText)"
+    }
+
     /// Handles a set start/stop — called by BOTH the manual button and the strap double-tap
     /// (via `AppModel.doubleTapInterceptor`). Always returns true while this controller is the
     /// active interceptor, so the tap never falls through to the user's configured double-tap action.
+    ///
+    /// Two noise guards, since the app only ever sees a fired "double-tap" event with no raw motion
+    /// data to threshold on (the gesture recognizer itself lives in the strap's firmware, out of
+    /// reach from here): an extra debounce on top of `AppModel`'s own 1.2s (longer when the user has
+    /// turned on "less sensitive"), and a minimum plausible set duration — an end-tap arriving less
+    /// than 1.5s after the start-tap is far more likely to be a second false trigger from the same
+    /// hard rep than a real (impossibly short) completed set, so it's dropped rather than logged.
     @discardableResult
     func toggleSet() -> Bool {
+        let now = Date()
+        let debounce: TimeInterval = UserDefaults.standard.bool(forKey: Self.robustDoubleTapKey) ? 2.5 : 1.0
+        guard now.timeIntervalSince(lastToggleAt) > debounce else { return true }
+
         guard let exercise = selectedExercise else { return true }
+
         if let startedAt = setStartedAt {
-            // End the running set.
+            // Noise guard: an implausibly short "set" is almost certainly a second false trigger from
+            // the same movement, not a real end-tap. Leave the set running and ignore it silently.
+            guard now.timeIntervalSince(startedAt) >= 1.5 else { return true }
+
+            lastToggleAt = now
             setStartedAt = nil
-            let duration = Date().timeIntervalSince(startedAt)
+            let duration = now.timeIntervalSince(startedAt)
             let restBefore = lastSetEndedAt(for: exercise).map { startedAt.timeIntervalSince($0) }
+            let target = nextTarget(for: exercise)
             let lastSet = sets(for: exercise).last
             pendingSet = PendingSet(
                 exerciseName: exercise,
                 setIndex: sets(for: exercise).count,
                 durationS: duration,
                 restBeforeS: restBefore,
-                defaultWeightKg: lastSet?.weightKg,
-                defaultReps: lastSet?.reps
+                defaultWeightKg: target?.targetWeightKg ?? lastSet?.weightKg,
+                defaultReps: target?.targetReps ?? lastSet?.reps
             )
             buzzSetEnded()
         } else {
-            setStartedAt = Date()
+            lastToggleAt = now
+            setStartedAt = now
             buzzSetStarted()
         }
         return true
@@ -115,6 +175,39 @@ final class ActiveTrainingController: ObservableObject {
         ended.endTs = Int(Date().timeIntervalSince1970)
         session = ended
         await repo.saveStrengthSession(ended)
+        await writeBackTemplateIfNeeded()
+    }
+
+    /// Auto-learning: fold what was ACTUALLY achieved this session back into the template's plan, so
+    /// next time it opens pre-filled with the latest numbers instead of going stale. A planned set
+    /// that was never logged (skipped) keeps its old target untouched; sets logged beyond what the
+    /// plan had are appended, so an ad-hoc extra set (or a whole ad-hoc exercise) grows the plan
+    /// rather than being silently dropped.
+    private func writeBackTemplateIfNeeded() async {
+        guard var template else { return }
+        var plan = template.plan
+        for exercise in exerciseNames {
+            let achieved = sets(for: exercise)
+            guard !achieved.isEmpty else { continue }
+            if let idx = plan.firstIndex(where: { $0.exerciseName == exercise }) {
+                for (i, set) in achieved.enumerated() {
+                    let updated = TemplateSetPlan(targetReps: set.reps, targetWeightKg: set.weightKg)
+                    if plan[idx].sets.indices.contains(i) {
+                        plan[idx].sets[i] = updated
+                    } else {
+                        plan[idx].sets.append(updated)
+                    }
+                }
+            } else {
+                plan.append(TemplateExercisePlan(
+                    exerciseName: exercise,
+                    sets: achieved.map { TemplateSetPlan(targetReps: $0.reps, targetWeightKg: $0.weightKg) }
+                ))
+            }
+        }
+        template.planJSON = StrengthTemplateRow.encode(plan)
+        template.updatedAt = Int(Date().timeIntervalSince1970)
+        await repo.saveTemplate(template)
     }
 
     // MARK: - Haptic feedback

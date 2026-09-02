@@ -2673,6 +2673,25 @@ final class Repository: ObservableObject {
         return names
     }
 
+    // MARK: - Strength training templates
+
+    /// Saved templates, most-recently-updated first.
+    func strengthTemplates() async -> [StrengthTemplateRow] {
+        guard let store = await ensureStore() else { return [] }
+        return (try? await store.templates(deviceId: WhoopStore.strengthLogSourceId)) ?? []
+    }
+
+    /// Create or edit (by re-passing the same `id`) one template.
+    func saveTemplate(_ template: StrengthTemplateRow) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.upsertTemplate(template)
+    }
+
+    func deleteTemplate(id: String) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.deleteTemplate(id: id)
+    }
+
     /// All workouts (Whoop + Apple Health + on-device detected bouts), newest first.
     ///
     /// Detected bouts are surfaced with an honest "Detected" badge so the user can see , and
