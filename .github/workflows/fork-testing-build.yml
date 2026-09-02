@@ -165,6 +165,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VER: ${{ needs.meta.outputs.ver }}
+          BUILD_NUM: ${{ github.run_number }}
         run: |
           APP=$(find build/dd/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -1)
           test -n "$APP" || { echo ".app (iphoneos) not found"; exit 1; }
@@ -179,8 +180,19 @@ jobs:
           # provisions the shared container instead of treating both executables as entitlement-free.
           Tools/prepare-ios-sideload-app.sh "$APP"
           rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
-          zip -qr "NOOP-ios-unsigned-v${VER}.ipa" Payload
-          gh release upload "${{ needs.meta.outputs.tag }}" "NOOP-ios-unsigned-v${VER}.ipa" --repo "$GITHUB_REPOSITORY" --clobber
+          # A build-number suffix keeps this filename (and thus URL) unique on every run — reusing the
+          # same "NOOP-ios-unsigned-v${VER}.ipa" name and --clobbering it left the door open for GitHub's
+          # CDN edge cache or the device's own URL cache to keep serving a stale, already-cached .ipa
+          # after a fresh upload, so a device could re-download the OLD binary under the new source's
+          # (correct) version metadata — producing the exact same "version doesn't match" install failure.
+          IPA="NOOP-ios-unsigned-v${VER}-b${BUILD_NUM}.ipa"
+          zip -qr "$IPA" Payload
+          gh release upload "${{ needs.meta.outputs.tag }}" "$IPA" --repo "$GITHUB_REPOSITORY"
+          # Drop older .ipa assets from this rolling release so it doesn't grow without bound now that
+          # every run's filename is unique.
+          gh release view "${{ needs.meta.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq ".assets[].name | select(startswith(\"NOOP-ios-unsigned-v\") and . != \"$IPA\")" \
+            | xargs -I{} gh release delete-asset "${{ needs.meta.outputs.tag }}" "{}" --repo "$GITHUB_REPOSITORY" --yes
       # Lets AltStore/SideStore offer this build as an in-place UPDATE instead of requiring a manual
       # delete-and-reinstall each time. AltStore Classic's VerifyAppOperation hard-fails the install
       # ("The version of NOOP does not match the version specified by the source") unless `version` here
@@ -196,7 +208,7 @@ jobs:
           VER: ${{ needs.meta.outputs.ver }}
           BUILD_NUM: ${{ github.run_number }}
         run: |
-          IPA="NOOP-ios-unsigned-v${VER}.ipa"
+          IPA="NOOP-ios-unsigned-v${VER}-b${BUILD_NUM}.ipa"
           SIZE=$(stat -f%z "$IPA")
           DATE=$(date -u +%Y-%m-%d)
           SHA="${GITHUB_SHA:0:7}"
