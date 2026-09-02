@@ -9,6 +9,9 @@ final class ActiveTrainingController: ObservableObject {
     /// UserDefaults key for the "less sensitive" double-tap toggle, read here and written by a
     /// plain `@AppStorage` Toggle on `TrainingView` — kept as one shared key so both sides agree.
     static let robustDoubleTapKey = "strengthRobustDoubleTap"
+    /// UserDefaults key for the configurable rest-timer target (seconds), same sharing pattern.
+    static let restTargetSecondsKey = "strengthRestTargetSeconds"
+    static let defaultRestTargetSeconds = 90
 
     @Published private(set) var session: StrengthSessionRow
     @Published private(set) var sets: [StrengthSetRow] = []
@@ -35,6 +38,9 @@ final class ActiveTrainingController: ObservableObject {
     /// and receives the actually-achieved values back when the training ends (see `endTraining()`).
     private let template: StrengthTemplateRow?
     private var lastToggleAt: Date = .distantPast
+    /// Exercises the rest-timer buzz has already fired for during the CURRENT rest period — cleared
+    /// when a new set starts for that exercise, so the buzz fires once per rest, not once per second.
+    private var restBuzzedExercises: Set<String> = []
 
     init(session: StrengthSessionRow, repo: Repository, model: AppModel, template: StrengthTemplateRow? = nil) {
         self.session = session
@@ -153,9 +159,23 @@ final class ActiveTrainingController: ObservableObject {
         } else {
             lastToggleAt = now
             setStartedAt = now
+            restBuzzedExercises.remove(exercise)
             buzzSetStarted()
         }
         return true
+    }
+
+    /// Called once a second (from the active-exercise card's own `TimelineView` tick — no separate
+    /// timer needed) while resting: once the elapsed rest crosses the configured target, fires a
+    /// single medium buzz as a "start your next set" nudge. Fires at most once per rest period.
+    func checkRestBuzz(for exerciseName: String, now: Date) {
+        guard setStartedAt == nil, selectedExercise == exerciseName,
+              !restBuzzedExercises.contains(exerciseName),
+              let lastEnd = lastSetEndedAt(for: exerciseName) else { return }
+        let target = UserDefaults.standard.object(forKey: Self.restTargetSecondsKey) as? Int ?? Self.defaultRestTargetSeconds
+        guard now.timeIntervalSince(lastEnd) >= TimeInterval(target) else { return }
+        restBuzzedExercises.insert(exerciseName)
+        model.buzz(loops: 3)
     }
 
     /// Confirms a just-ended set with the reps/weight the user entered, then reloads. Takes the
@@ -174,6 +194,17 @@ final class ActiveTrainingController: ObservableObject {
         )
         await repo.logStrengthSet(row)
         await load()
+        advanceIfComplete(pending.exerciseName)
+    }
+
+    /// Once the just-logged exercise has every planned set done, jump to the next incomplete one in
+    /// order — but only if the user is still looking at the exercise that just got completed (they
+    /// may have already switched away manually while the confirm sheet was open).
+    private func advanceIfComplete(_ exerciseName: String) {
+        guard isComplete(exerciseName), selectedExercise == exerciseName else { return }
+        if let next = exerciseNames.first(where: { $0 != exerciseName && !isComplete($0) }) {
+            selectedExercise = next
+        }
     }
 
     func discardPendingSet() {
@@ -191,6 +222,12 @@ final class ActiveTrainingController: ObservableObject {
         session = ended
         await repo.saveStrengthSession(ended)
         await writeBackTemplateIfNeeded()
+    }
+
+    /// Deletes the session (and every set logged in it) instead of ending it — no template
+    /// write-back, since nothing about this training should count.
+    func discardTraining() async {
+        await repo.deleteStrengthSession(id: session.id)
     }
 
     /// Auto-learning: fold what was ACTUALLY achieved this session back into the template's plan, so

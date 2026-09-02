@@ -68,10 +68,15 @@ struct ActiveTrainingView: View {
             }
         }
         .confirmationDialog("End this training?", isPresented: $showEndConfirm, titleVisibility: .visible) {
-            Button("End Training", role: .destructive) {
+            Button("Save & End") {
                 Task { await controller.endTraining(); dismiss() }
             }
+            Button("Discard Training", role: .destructive) {
+                Task { await controller.discardTraining(); dismiss() }
+            }
             Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Save keeps every logged set and updates the template. Discard deletes this training entirely.")
         }
     }
 
@@ -190,6 +195,7 @@ struct ActiveTrainingView: View {
 
     private func setTimer(_ exercise: String) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
+            controller.checkRestBuzz(for: exercise, now: context.date)
             let (label, seconds): (String, Int) = {
                 if let startedAt = controller.setStartedAt {
                     return ("Set time", Int(context.date.timeIntervalSince(startedAt)))

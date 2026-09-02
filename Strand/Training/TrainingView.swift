@@ -17,6 +17,7 @@ struct TrainingView: View {
     @State private var startedTemplate: StrengthTemplateRow?
     @State private var showStartPicker = false
     @AppStorage(ActiveTrainingController.robustDoubleTapKey) private var robustDoubleTap = false
+    @AppStorage(ActiveTrainingController.restTargetSecondsKey) private var restTargetSeconds = ActiveTrainingController.defaultRestTargetSeconds
 
     var body: some View {
         ScreenScaffold(title: "Training", subtitle: "Your strength sessions, on this device only.",
@@ -39,17 +40,29 @@ struct TrainingView: View {
                     .padding(.horizontal, 4)
                 }
                 NoopCard {
-                    Toggle(isOn: $robustDoubleTap) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Less sensitive double-tap")
-                                .font(StrandFont.subhead)
-                                .foregroundStyle(StrandPalette.textPrimary)
-                            Text("Waits longer between taps and ignores an end-tap that arrives implausibly fast, so a hard rep is less likely to start/end a set by itself.")
-                                .font(StrandFont.footnote)
-                                .foregroundStyle(StrandPalette.textSecondary)
+                    VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                        Toggle(isOn: $robustDoubleTap) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Less sensitive double-tap")
+                                    .font(StrandFont.subhead)
+                                    .foregroundStyle(StrandPalette.textPrimary)
+                                Text("Waits longer between taps and ignores an end-tap that arrives implausibly fast, so a hard rep is less likely to start/end a set by itself.")
+                                    .font(StrandFont.footnote)
+                                    .foregroundStyle(StrandPalette.textSecondary)
+                            }
                         }
+                        .tint(StrandPalette.accent)
+                        Divider().opacity(0.4)
+                        Picker("Rest timer", selection: $restTargetSeconds) {
+                            ForEach([30, 45, 60, 90, 120, 150, 180, 240], id: \.self) { seconds in
+                                Text(ActiveWorkoutClock.clock(seconds)).tag(seconds)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        Text("A short buzz on your strap when a rest this long has passed since your last set — your cue to start the next one.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
                     }
-                    .tint(StrandPalette.accent)
                 }
                 if loaded && sessions.isEmpty {
                     NoopCard {
