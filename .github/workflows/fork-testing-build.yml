@@ -185,14 +185,16 @@ jobs:
           # CDN edge cache or the device's own URL cache to keep serving a stale, already-cached .ipa
           # after a fresh upload, so a device could re-download the OLD binary under the new source's
           # (correct) version metadata — producing the exact same "version doesn't match" install failure.
+          # Older .ipa assets are deliberately NOT pruned here. A stale cached copy of
+          # altstore-source.json (device URL cache, or GitHub's own CDN edge) can still be served for a
+          # while after a new run publishes a fresh one — if that stale source points at a build whose
+          # .ipa we'd already deleted, install fails with a "data couldn't be read" error that looks
+          # identical to the version-mismatch bug this whole per-run-filename scheme was built to fix,
+          # except intermittent. Keeping every build's .ipa around means any such stale source still
+          # resolves. This is a low-traffic testing release; the storage cost is negligible.
           IPA="NOOP-ios-unsigned-v${VER}-b${BUILD_NUM}.ipa"
           zip -qr "$IPA" Payload
           gh release upload "${{ needs.meta.outputs.tag }}" "$IPA" --repo "$GITHUB_REPOSITORY"
-          # Drop older .ipa assets from this rolling release so it doesn't grow without bound now that
-          # every run's filename is unique.
-          gh release view "${{ needs.meta.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq ".assets[].name | select(startswith(\"NOOP-ios-unsigned-v\") and . != \"$IPA\")" \
-            | xargs -I{} gh release delete-asset "${{ needs.meta.outputs.tag }}" "{}" --repo "$GITHUB_REPOSITORY" --yes
       # Lets AltStore/SideStore offer this build as an in-place UPDATE instead of requiring a manual
       # delete-and-reinstall each time. AltStore Classic's VerifyAppOperation hard-fails the install
       # ("The version of NOOP does not match the version specified by the source") unless `version` here
