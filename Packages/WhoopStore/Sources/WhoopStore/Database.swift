@@ -976,6 +976,13 @@ extension WhoopStore {
             try db.create(index: "idx_strengthTemplate_device",
                           on: "strengthTemplate", columns: ["deviceId"])
         }
+        // v45: per-template rest-timer target (seconds). Additive, nullable - existing templates keep
+        // using the app's default until edited and explicitly given a value.
+        migrator.registerMigration("v45-strength-template-rest") { db in
+            try db.alter(table: "strengthTemplate") { t in
+                t.add(column: "restTargetSeconds", .integer)
+            }
+        }
         return migrator
     }
 }

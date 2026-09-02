@@ -23,13 +23,13 @@ struct FoodView: View {
 
     @State private var showLogSheet = false
     @State private var editingEntry: MealEntryRow?
-    @State private var showGoalsSheet = false
+    @State private var quickAddMealType: FoodMealType?
+    @State private var expandedMealType: FoodMealType?
 
     @AppStorage("foodGoalKcal") private var goalKcal = 2000.0
     @AppStorage("foodGoalProteinG") private var goalProtein = 150.0
     @AppStorage("foodGoalCarbsG") private var goalCarbs = 250.0
     @AppStorage("foodGoalFatG") private var goalFat = 70.0
-    @AppStorage("foodGoalKind") private var goalKindRaw = CalorieGoalKind.maintain.rawValue
 
     @State private var heroFraction: Double = 0
     /// (BMR + active kcal) for each of the last few PAST days that had Apple Health active-kcal data
@@ -42,7 +42,6 @@ struct FoodView: View {
     private var day: String {
         Repository.localDayKey(Calendar.current.date(byAdding: .day, value: -dayOffset, to: today) ?? today)
     }
-    private var goalKind: CalorieGoalKind { CalorieGoalKind(rawValue: goalKindRaw) ?? .maintain }
     private var bmr: Double {
         CalorieTarget.bmr(sex: profile.sex, weightKg: profile.weightKg, heightCm: profile.heightCm, age: profile.age)
     }
@@ -59,9 +58,7 @@ struct FoodView: View {
                     dayOffset = newOffset
                     Task { await reload() }
                 }
-                goalPicker
-                ringSection
-                macrosSection
+                heroSection
                 if dayOffset == 0 { energyBalanceSection }
                 mealsSection
             }
@@ -72,9 +69,10 @@ struct FoodView: View {
                 withAnimation(.easeOut(duration: 0.9)) { heroFraction = fraction }
             }
         }
-        // Pinned above the tab bar (not the last item in the scroll content) so it's always one tap
-        // away without scrolling — matches LiveWorkoutView's floating bottom control bar convention.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        // Pinned above the tab bar, overlaid into the bottom scroll clearance `ScreenScaffold`
+        // already reserves (`NoopMetrics.tabBarClearance`) rather than via `.safeAreaInset`, which
+        // this app's native `TabView` doesn't propagate safe-area insets through correctly.
+        .overlay(alignment: .bottom) {
             logMealButton
         }
         .task(id: dayOffset) { await reload() }
@@ -88,8 +86,10 @@ struct FoodView: View {
                 Task { await repo.logMeal(updated); await reload() }
             }
         }
-        .sheet(isPresented: $showGoalsSheet) {
-            FoodGoalsSheet(kcal: $goalKcal, protein: $goalProtein, carbs: $goalCarbs, fat: $goalFat)
+        .sheet(item: $quickAddMealType) { type in
+            LogMealSheet(presetMealType: type, day: day) { entry in
+                Task { await repo.logMeal(entry); await reload() }
+            }
         }
     }
 
@@ -100,81 +100,70 @@ struct FoodView: View {
             showLogSheet = true
         }
         .padding(.horizontal, NoopMetrics.screenHPadding)
-        .padding(.top, NoopMetrics.space2)
-        .padding(.bottom, NoopMetrics.space2)
-        .background {
-            NoopPanelSurface(cornerRadius: 0, elevated: true).ignoresSafeArea(edges: .bottom)
+        .padding(.bottom, 8)
+    }
+
+    // MARK: - Hero (eaten / ring+remaining / burned, plus macro bars)
+
+    private var heroSection: some View {
+        NoopCard {
+            VStack(spacing: NoopMetrics.space5) {
+                HStack(spacing: 0) {
+                    heroStat(value: totals.kcal, label: "Eaten")
+                    Spacer(minLength: 0)
+                    ZStack {
+                        LiquidVessel(value: heroFraction, tint: StrandPalette.metricAmber, animated: true)
+                            .frame(width: 148, height: 148)
+                        VStack(spacing: 2) {
+                            CountUpText(value: max(0, goalKcal - totals.kcal),
+                                        format: { String(Int($0.rounded())) },
+                                        font: StrandFont.rounded(32, weight: .bold),
+                                        color: StrandPalette.textPrimary)
+                                .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
+                            Text("Remaining")
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                        }
+                        .allowsHitTesting(false)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Calories remaining")
+                    .accessibilityValue("\(Int(max(0, goalKcal - totals.kcal).rounded())) of \(Int(goalKcal)) kcal")
+                    Spacer(minLength: 0)
+                    heroStat(value: todayActiveKcal, label: "Burned")
+                }
+                HStack(alignment: .top, spacing: NoopMetrics.space5) {
+                    macroColumn(label: "Protein", value: totals.protein, goal: goalProtein, tint: StrandPalette.textPrimary)
+                    macroColumn(label: "Carbs", value: totals.carbs, goal: goalCarbs, tint: StrandPalette.metricCyan)
+                    macroColumn(label: "Fat", value: totals.fat, goal: goalFat, tint: StrandPalette.effortColor)
+                }
+            }
         }
     }
 
-    // MARK: - Goal picker (drives the suggested calorie target)
+    private func heroStat(value: Double, label: String) -> some View {
+        VStack(spacing: 2) {
+            Text("\(Int(value.rounded()))")
+                .font(StrandFont.title2)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .monospacedDigit()
+            Text(label)
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+        }
+    }
 
-    private var goalPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Picker("Goal", selection: Binding(
-                get: { goalKind },
-                set: { newKind in
-                    goalKindRaw = newKind.rawValue
-                    goalKcal = CalorieTarget.targetKcal(bmr: bmr, recentDailyBurns: recentDailyBurns, goal: newKind)
-                }
-            )) {
-                ForEach(CalorieGoalKind.allCases) { kind in Text(kind.label).tag(kind) }
-            }
-            .pickerStyle(.segmented)
-            Text(recentDailyBurns.count >= CalorieTarget.minDaysForMeasuredTDEE
-                 ? "Target based on your last \(recentDailyBurns.count) days' measured burn."
-                 : "Target based on an estimate — measured burn kicks in after a few more days of data.")
+    private func macroColumn(label: String, value: Double, goal: Double, tint: Color) -> some View {
+        VStack(spacing: 6) {
+            Text(label)
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+            PipBar(value: value, range: 0...max(goal, value, 1), segments: 20, tint: tint, height: 7)
+            Text("\(Int(value.rounded())) / \(Int(goal)) g")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
         }
-    }
-
-    // MARK: - Hero ring (calories eaten vs. goal)
-
-    private var ringSection: some View {
-        NoopCard {
-            VStack(spacing: NoopMetrics.cardInnerSpacing) {
-                ZStack {
-                    LiquidVessel(value: heroFraction, tint: StrandPalette.metricAmber, animated: true)
-                        .frame(width: 184, height: 184)
-                    VStack(spacing: 2) {
-                        CountUpText(value: totals.kcal,
-                                    format: { String(Int($0.rounded())) },
-                                    font: StrandFont.rounded(40, weight: .bold),
-                                    color: StrandPalette.textPrimary)
-                            .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
-                        Text("of \(Int(goalKcal)) kcal")
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                    }
-                    .allowsHitTesting(false)
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Calories today")
-                .accessibilityValue("\(Int(totals.kcal.rounded())) of \(Int(goalKcal)) kcal")
-                Button("Edit goals") { showGoalsSheet = true }
-                    .font(StrandFont.footnote)
-            }
-            .frame(maxWidth: .infinity)
-        }
-    }
-
-    // MARK: - Macro bars
-
-    private var macrosSection: some View {
-        NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                PipBarRow(label: "Protein", value: totals.protein, range: 0...max(goalProtein, totals.protein, 1),
-                         tint: StrandPalette.textPrimary, valueText: "\(Int(totals.protein.rounded()))",
-                         unit: "of \(Int(goalProtein))g")
-                PipBarRow(label: "Carbs", value: totals.carbs, range: 0...max(goalCarbs, totals.carbs, 1),
-                         tint: StrandPalette.metricCyan, valueText: "\(Int(totals.carbs.rounded()))",
-                         unit: "of \(Int(goalCarbs))g")
-                PipBarRow(label: "Fat", value: totals.fat, range: 0...max(goalFat, totals.fat, 1),
-                         tint: StrandPalette.effortColor, valueText: "\(Int(totals.fat.rounded()))",
-                         unit: "of \(Int(goalFat))g")
-            }
-        }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Energy balance (today's actual deficit/surplus + 7-day chart)
@@ -214,22 +203,12 @@ struct FoodView: View {
     // MARK: - Meals grouped by type
 
     @ViewBuilder private var mealsSection: some View {
-        ForEach(FoodMealType.allCases) { type in
-            let rows = entries.filter { $0.mealType == type.rawValue }
-            if !rows.isEmpty {
-                NoopCard {
-                    VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                        HStack(spacing: 6) {
-                            Image(systemName: type.icon).foregroundStyle(StrandPalette.accent)
-                            Text(type.label).strandOverline()
-                        }
-                        VStack(spacing: 0) {
-                            ForEach(Array(rows.enumerated()), id: \.element.id) { idx, entry in
-                                entryRow(entry)
-                                if idx < rows.count - 1 { Divider().opacity(0.4) }
-                            }
-                        }
-                    }
+        Text("Nutrition").strandOverline()
+        NoopCard {
+            VStack(spacing: 0) {
+                ForEach(Array(FoodMealType.allCases.enumerated()), id: \.element.id) { idx, type in
+                    mealTypeRow(type)
+                    if idx < FoodMealType.allCases.count - 1 { Divider().opacity(0.4) }
                 }
             }
         }
@@ -239,6 +218,109 @@ struct FoodView: View {
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
             }
+        }
+    }
+
+    private func mealTypeRow(_ type: FoodMealType) -> some View {
+        let rows = entries.filter { $0.mealType == type.rawValue }
+        let eaten = eatenKcal(for: type)
+        let allocated = allocatedKcal(for: type)
+        let fraction = allocated > 0 ? min(1.0, max(0.0, eaten / allocated)) : 0
+        let preview = rows.compactMap { foodsById[$0.foodItemId]?.name }.joined(separator: ", ")
+        let isExpanded = expandedMealType == type
+        return VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        expandedMealType = isExpanded ? nil : type
+                    }
+                } label: {
+                    HStack(spacing: 12) {
+                        mealTypeRing(fraction: fraction, icon: type.icon)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 4) {
+                                Text(type.label)
+                                    .font(StrandFont.subhead)
+                                    .foregroundStyle(StrandPalette.textPrimary)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(StrandPalette.textTertiary)
+                                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            }
+                            Text("\(Int(eaten.rounded())) / \(Int(allocated.rounded())) kcal")
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                            if !preview.isEmpty {
+                                Text(preview)
+                                    .font(StrandFont.footnote)
+                                    .foregroundStyle(StrandPalette.textTertiary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer(minLength: 8)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Button {
+                    quickAddMealType = type
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(StrandPalette.accent)
+                        .frame(width: 32, height: 32)
+                        .background(StrandPalette.surfaceInset, in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.vertical, 8)
+            if isExpanded && !rows.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { idx, entry in
+                        entryRow(entry)
+                        if idx < rows.count - 1 { Divider().opacity(0.4) }
+                    }
+                }
+                .padding(.leading, 56)
+                .padding(.bottom, 8)
+            }
+        }
+    }
+
+    /// Small circular progress ring (eaten / allocated kcal for one meal type) with its SF Symbol
+    /// icon centered inside — a lighter-weight sibling of `LiquidVessel`, sized for a list row.
+    private func mealTypeRing(fraction: Double, icon: String) -> some View {
+        ZStack {
+            Circle()
+                .stroke(StrandPalette.surfaceInset, lineWidth: 3)
+            Circle()
+                .trim(from: 0, to: max(0.0001, fraction))
+                .stroke(StrandPalette.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(StrandPalette.accent)
+        }
+        .frame(width: 44, height: 44)
+    }
+
+    /// Fixed percentage split of the daily calorie goal across meal types (breakfast/lunch/dinner
+    /// biggest, snack smallest) — used only as the denominator for each meal type's mini-ring.
+    private func allocatedKcal(for type: FoodMealType) -> Double {
+        let ratio: Double
+        switch type {
+        case .breakfast: ratio = 0.30
+        case .lunch: ratio = 0.40
+        case .dinner: ratio = 0.25
+        case .snack: ratio = 0.05
+        }
+        return goalKcal * ratio
+    }
+
+    private func eatenKcal(for type: FoodMealType) -> Double {
+        entries.filter { $0.mealType == type.rawValue }.reduce(0.0) { acc, entry in
+            guard let food = foodsById[entry.foodItemId] else { return acc }
+            return acc + (food.kcalPer100g ?? 0) * entry.quantityGrams / 100.0
         }
     }
 
@@ -338,75 +420,5 @@ struct FoodView: View {
             series.append(EnergyBalanceDay(day: key, date: date, balanceKcal: balance))
         }
         weeklyBalance = series
-    }
-}
-
-// MARK: - Goals editor
-
-private struct FoodGoalsSheet: View {
-    @Binding var kcal: Double
-    @Binding var protein: Double
-    @Binding var carbs: Double
-    @Binding var fat: Double
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var kcalText: String
-    @State private var proteinText: String
-    @State private var carbsText: String
-    @State private var fatText: String
-
-    init(kcal: Binding<Double>, protein: Binding<Double>, carbs: Binding<Double>, fat: Binding<Double>) {
-        _kcal = kcal; _protein = protein; _carbs = carbs; _fat = fat
-        _kcalText = State(initialValue: String(Int(kcal.wrappedValue)))
-        _proteinText = State(initialValue: String(Int(protein.wrappedValue)))
-        _carbsText = State(initialValue: String(Int(carbs.wrappedValue)))
-        _fatText = State(initialValue: String(Int(fat.wrappedValue)))
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-            Text("Daily goals")
-                .font(StrandFont.title2)
-                .foregroundStyle(StrandPalette.textPrimary)
-            Text("Calories default to a suggestion based on your profile and goal — edit here to override it.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
-            goalField("Calories", text: $kcalText, unit: "kcal")
-            goalField("Protein", text: $proteinText, unit: "g")
-            goalField("Carbs", text: $carbsText, unit: "g")
-            goalField("Fat", text: $fatText, unit: "g")
-            HStack(spacing: NoopMetrics.gap) {
-                NoopButton("Cancel", kind: .secondary, fullWidth: true) { dismiss() }
-                NoopButton("Save", kind: .primary, fullWidth: true) {
-                    kcal = Double(kcalText) ?? kcal
-                    protein = Double(proteinText) ?? protein
-                    carbs = Double(carbsText) ?? carbs
-                    fat = Double(fatText) ?? fat
-                    dismiss()
-                }
-            }
-        }
-        .padding(NoopMetrics.space5)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(StrandPalette.surfaceBase.ignoresSafeArea())
-        #if os(iOS)
-        .presentationDetents([.height(400)])
-        .presentationDragIndicator(.visible)
-        #endif
-    }
-
-    private func goalField(_ label: String, text: Binding<String>, unit: String) -> some View {
-        HStack {
-            Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-            Spacer()
-            TextField("", text: text)
-                .textFieldStyle(.plain)
-                .font(StrandFont.bodyNumber)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .numericKeyboard()
-                .multilineTextAlignment(.trailing)
-                .frame(width: 70)
-            Text(unit).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-        }
     }
 }

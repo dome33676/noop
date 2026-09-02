@@ -16,8 +16,9 @@ struct TrainingView: View {
     @State private var startedSession: StrengthSessionRow?
     @State private var startedTemplate: StrengthTemplateRow?
     @State private var showStartPicker = false
-    @AppStorage(ActiveTrainingController.robustDoubleTapKey) private var robustDoubleTap = false
-    @AppStorage(ActiveTrainingController.restTargetSecondsKey) private var restTargetSeconds = ActiveTrainingController.defaultRestTargetSeconds
+    @State private var templates: [StrengthTemplateRow] = []
+    @State private var showNewTemplate = false
+    @State private var editingTemplate: StrengthTemplateRow?
 
     var body: some View {
         ScreenScaffold(title: "Training", subtitle: "Your strength sessions, on this device only.",
@@ -26,44 +27,39 @@ struct TrainingView: View {
                 NoopButton("Start Training", systemImage: "dumbbell.fill", kind: .primary, fullWidth: true) {
                     showStartPicker = true
                 }
-                NavigationLink {
-                    TemplateListView()
-                } label: {
-                    HStack {
-                        Image(systemName: "list.bullet.rectangle")
-                        Text("Manage Templates")
-                        Spacer()
-                        Image(systemName: "chevron.right")
+                WeeklyScheduleSection()
+                HStack {
+                    Text("Templates").strandOverline()
+                    Spacer()
+                    Button { showNewTemplate = true } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(StrandPalette.accent)
+                            .frame(width: 30, height: 30)
+                            .background(StrandPalette.surfaceInset, in: Circle())
                     }
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .padding(.horizontal, 4)
+                    .buttonStyle(.plain)
                 }
-                NoopCard {
-                    VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                        Toggle(isOn: $robustDoubleTap) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Less sensitive double-tap")
-                                    .font(StrandFont.subhead)
-                                    .foregroundStyle(StrandPalette.textPrimary)
-                                Text("Waits longer between taps and ignores an end-tap that arrives implausibly fast, so a hard rep is less likely to start/end a set by itself.")
-                                    .font(StrandFont.footnote)
-                                    .foregroundStyle(StrandPalette.textSecondary)
-                            }
-                        }
-                        .tint(StrandPalette.accent)
-                        Divider().opacity(0.4)
-                        Picker("Rest timer", selection: $restTargetSeconds) {
-                            ForEach([30, 45, 60, 90, 120, 150, 180, 240], id: \.self) { seconds in
-                                Text(ActiveWorkoutClock.clock(seconds)).tag(seconds)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        Text("A short buzz on your strap when a rest this long has passed since your last set — your cue to start the next one.")
-                            .font(StrandFont.footnote)
+                if templates.isEmpty {
+                    NoopCard {
+                        Text("No templates yet. Create one to reuse a plan across trainings.")
+                            .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
                     }
+                } else {
+                    NoopCard {
+                        VStack(spacing: 0) {
+                            ForEach(Array(templates.enumerated()), id: \.element.id) { idx, template in
+                                Button { editingTemplate = template } label: {
+                                    templateRow(template)
+                                }
+                                .buttonStyle(.plain)
+                                if idx < templates.count - 1 { Divider().opacity(0.3) }
+                            }
+                        }
+                    }
                 }
+                Text("Vergangene Trainings").strandOverline()
                 if loaded && sessions.isEmpty {
                     NoopCard {
                         Text("No trainings logged yet.")
@@ -87,10 +83,23 @@ struct TrainingView: View {
                 }
             }
         }
-        .task { await reload() }
+        .task {
+            await reload()
+            await reloadTemplates()
+        }
         .sheet(isPresented: $showStartPicker) {
             StartTrainingSheet { template in
                 startTraining(from: template)
+            }
+        }
+        .sheet(isPresented: $showNewTemplate) {
+            TemplateEditorView { template in
+                Task { await repo.saveTemplate(template); await reloadTemplates() }
+            }
+        }
+        .sheet(item: $editingTemplate) { template in
+            TemplateEditorView(editing: template) { updated in
+                Task { await repo.saveTemplate(updated); await reloadTemplates() }
             }
         }
         // A just-started session is presented full-screen (matching the Live-session convention:
@@ -151,6 +160,34 @@ struct TrainingView: View {
     private func reload() async {
         sessions = await repo.strengthSessions()
         loaded = true
+    }
+
+    private func templateRow(_ template: StrengthTemplateRow) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(template.name)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text("\(template.plan.count) exercise\(template.plan.count == 1 ? "" : "s")")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            Spacer()
+            Button(role: .destructive) {
+                Task { await repo.deleteTemplate(id: template.id); await reloadTemplates() }
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            .buttonStyle(.plain)
+        }
+        .contentShape(Rectangle())
+        .padding(.vertical, 6)
+    }
+
+    private func reloadTemplates() async {
+        templates = await repo.strengthTemplates()
     }
 }
 

@@ -15,20 +15,25 @@ public struct StrengthTemplateRow: Identifiable, Equatable, Codable, Sendable {
     public var planJSON: String
     public var createdAt: Int
     public var updatedAt: Int
+    public var restTargetSeconds: Int?
 
-    public init(id: String, deviceId: String, name: String, planJSON: String, createdAt: Int, updatedAt: Int) {
+    public init(
+        id: String, deviceId: String, name: String, planJSON: String, createdAt: Int, updatedAt: Int,
+        restTargetSeconds: Int? = nil
+    ) {
         self.id = id
         self.deviceId = deviceId
         self.name = name
         self.planJSON = planJSON
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.restTargetSeconds = restTargetSeconds
     }
 
     static func decode(_ row: Row) -> StrengthTemplateRow {
         StrengthTemplateRow(
             id: row["id"], deviceId: row["deviceId"], name: row["name"], planJSON: row["planJSON"],
-            createdAt: row["createdAt"], updatedAt: row["updatedAt"]
+            createdAt: row["createdAt"], updatedAt: row["updatedAt"], restTargetSeconds: row["restTargetSeconds"]
         )
     }
 }
@@ -39,15 +44,16 @@ extension WhoopStore {
     public func upsertTemplate(_ template: StrengthTemplateRow) async throws -> Int {
         try syncWrite { db in
             try db.execute(sql: """
-                INSERT INTO strengthTemplate (id, deviceId, name, planJSON, createdAt, updatedAt)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO strengthTemplate (id, deviceId, name, planJSON, createdAt, updatedAt, restTargetSeconds)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     planJSON = excluded.planJSON,
-                    updatedAt = excluded.updatedAt
+                    updatedAt = excluded.updatedAt,
+                    restTargetSeconds = excluded.restTargetSeconds
                 """, arguments: [
                     template.id, template.deviceId, template.name, template.planJSON,
-                    template.createdAt, template.updatedAt,
+                    template.createdAt, template.updatedAt, template.restTargetSeconds,
                 ])
             return db.changesCount
         }

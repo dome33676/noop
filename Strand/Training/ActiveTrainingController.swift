@@ -6,11 +6,6 @@ import WhoopStore
 /// LIVE state rather than a stale value-type snapshot from whichever render captured it.
 @MainActor
 final class ActiveTrainingController: ObservableObject {
-    /// UserDefaults key for the "less sensitive" double-tap toggle, read here and written by a
-    /// plain `@AppStorage` Toggle on `TrainingView` — kept as one shared key so both sides agree.
-    static let robustDoubleTapKey = "strengthRobustDoubleTap"
-    /// UserDefaults key for the configurable rest-timer target (seconds), same sharing pattern.
-    static let restTargetSecondsKey = "strengthRestTargetSeconds"
     static let defaultRestTargetSeconds = 90
 
     @Published private(set) var session: StrengthSessionRow
@@ -38,9 +33,12 @@ final class ActiveTrainingController: ObservableObject {
     /// and receives the actually-achieved values back when the training ends (see `endTraining()`).
     private let template: StrengthTemplateRow?
     private var lastToggleAt: Date = .distantPast
-    /// Exercises the rest-timer buzz has already fired for during the CURRENT rest period — cleared
-    /// when a new set starts for that exercise, so the buzz fires once per rest, not once per second.
-    private var restBuzzedExercises: Set<String> = []
+    /// Whether the rest-timer buzz has already fired during the CURRENT rest period — cleared when a
+    /// new set starts, so the buzz fires once per rest, not once per second.
+    private var restBuzzed = false
+    /// The rest clock's anchor: when the last set for ANY exercise in this session ended. One global
+    /// clock, not per exercise — switching which exercise is selected must not reset the countdown.
+    @Published private(set) var lastAnySetEndedAt: Date?
 
     init(session: StrengthSessionRow, repo: Repository, model: AppModel, template: StrengthTemplateRow? = nil) {
         self.session = session
@@ -124,14 +122,14 @@ final class ActiveTrainingController: ObservableObject {
     ///
     /// Two noise guards, since the app only ever sees a fired "double-tap" event with no raw motion
     /// data to threshold on (the gesture recognizer itself lives in the strap's firmware, out of
-    /// reach from here): an extra debounce on top of `AppModel`'s own 1.2s (longer when the user has
-    /// turned on "less sensitive"), and a minimum plausible set duration — an end-tap arriving less
-    /// than 1.5s after the start-tap is far more likely to be a second false trigger from the same
-    /// hard rep than a real (impossibly short) completed set, so it's dropped rather than logged.
+    /// reach from here): an extra debounce on top of `AppModel`'s own 1.2s, and a minimum plausible
+    /// set duration — an end-tap arriving less than 4s after the start-tap is far more likely to be a
+    /// second false trigger from the same hard rep than a real (impossibly short) completed set, so
+    /// it's dropped rather than logged.
     @discardableResult
     func toggleSet() -> Bool {
         let now = Date()
-        let debounce: TimeInterval = UserDefaults.standard.bool(forKey: Self.robustDoubleTapKey) ? 2.5 : 1.0
+        let debounce: TimeInterval = 2.5
         guard now.timeIntervalSince(lastToggleAt) > debounce else { return true }
 
         guard let exercise = selectedExercise else { return true }
@@ -139,12 +137,12 @@ final class ActiveTrainingController: ObservableObject {
         if let startedAt = setStartedAt {
             // Noise guard: an implausibly short "set" is almost certainly a second false trigger from
             // the same movement, not a real end-tap. Leave the set running and ignore it silently.
-            guard now.timeIntervalSince(startedAt) >= 1.5 else { return true }
+            guard now.timeIntervalSince(startedAt) >= 4.0 else { return true }
 
             lastToggleAt = now
             setStartedAt = nil
             let duration = now.timeIntervalSince(startedAt)
-            let restBefore = lastSetEndedAt(for: exercise).map { startedAt.timeIntervalSince($0) }
+            let restBefore = lastAnySetEndedAt.map { startedAt.timeIntervalSince($0) }
             let target = nextTarget(for: exercise)
             let lastSet = sets(for: exercise).last
             pendingSet = PendingSet(
@@ -155,26 +153,27 @@ final class ActiveTrainingController: ObservableObject {
                 defaultWeightKg: target?.targetWeightKg ?? lastSet?.weightKg,
                 defaultReps: target?.targetReps ?? lastSet?.reps
             )
+            lastAnySetEndedAt = now
             buzzSetEnded()
         } else {
             lastToggleAt = now
             setStartedAt = now
-            restBuzzedExercises.remove(exercise)
+            restBuzzed = false
             buzzSetStarted()
         }
         return true
     }
 
-    /// Called once a second (from the active-exercise card's own `TimelineView` tick — no separate
-    /// timer needed) while resting: once the elapsed rest crosses the configured target, fires a
-    /// single medium buzz as a "start your next set" nudge. Fires at most once per rest period.
-    func checkRestBuzz(for exerciseName: String, now: Date) {
-        guard setStartedAt == nil, selectedExercise == exerciseName,
-              !restBuzzedExercises.contains(exerciseName),
-              let lastEnd = lastSetEndedAt(for: exerciseName) else { return }
-        let target = UserDefaults.standard.object(forKey: Self.restTargetSecondsKey) as? Int ?? Self.defaultRestTargetSeconds
+    /// Called once a second (from the active-exercise card's own TimelineView tick) while resting:
+    /// once the elapsed rest since the LAST set logged for ANY exercise in this session crosses the
+    /// template's configured target (or the app default for a blank session), fires one medium buzz
+    /// as a "start your next set" nudge. One global rest clock, not per exercise - switching which
+    /// exercise you're about to do next should not reset or confuse the rest countdown.
+    func checkRestBuzz(now: Date) {
+        guard setStartedAt == nil, !restBuzzed, let lastEnd = lastAnySetEndedAt else { return }
+        let target = template?.restTargetSeconds ?? Self.defaultRestTargetSeconds
         guard now.timeIntervalSince(lastEnd) >= TimeInterval(target) else { return }
-        restBuzzedExercises.insert(exerciseName)
+        restBuzzed = true
         model.buzz(loops: 3)
     }
 

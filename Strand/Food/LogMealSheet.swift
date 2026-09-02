@@ -17,6 +17,10 @@ struct LogMealSheet: View {
     let day: String
     let onSave: (MealEntryRow) -> Void
 
+    /// When set, pre-selects this meal type instead of the time-of-day default — used by the
+    /// per-meal-type "+" button on `FoodView` so quick-adding a snack doesn't default to breakfast.
+    let presetMealType: FoodMealType?
+
     @EnvironmentObject private var repo: Repository
     @Environment(\.dismiss) private var dismiss
 
@@ -30,15 +34,16 @@ struct LogMealSheet: View {
     private enum NumberField: Hashable { case quantity }
     @FocusState private var focusedField: NumberField?
 
-    init(editing: MealEntryRow? = nil, initialFood: FoodItemRow? = nil, day: String,
-         onSave: @escaping (MealEntryRow) -> Void) {
+    init(editing: MealEntryRow? = nil, initialFood: FoodItemRow? = nil, presetMealType: FoodMealType? = nil,
+         day: String, onSave: @escaping (MealEntryRow) -> Void) {
         self.editing = editing
         self.initialFood = initialFood
+        self.presetMealType = presetMealType
         self.day = day
         self.onSave = onSave
         _selectedFood = State(initialValue: initialFood)
         _quantityText = State(initialValue: editing.map { Self.trimmed($0.quantityGrams) } ?? "100")
-        _mealType = State(initialValue: editing.flatMap { FoodMealType(rawValue: $0.mealType) } ?? Self.defaultMealType())
+        _mealType = State(initialValue: presetMealType ?? editing.flatMap { FoodMealType(rawValue: $0.mealType) } ?? Self.defaultMealType())
     }
 
     private static func trimmed(_ v: Double) -> String {

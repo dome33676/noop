@@ -46,7 +46,7 @@ final class StrengthStoreTests: XCTestCase {
     }
 
     func testSchemaVersionIs20() {
-        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 21)
+        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 22)
     }
 
     // MARK: - helpers

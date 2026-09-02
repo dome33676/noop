@@ -195,11 +195,11 @@ struct ActiveTrainingView: View {
 
     private func setTimer(_ exercise: String) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            let _: Void = controller.checkRestBuzz(for: exercise, now: context.date)
+            let _: Void = controller.checkRestBuzz(now: context.date)
             let (label, seconds): (String, Int) = {
                 if let startedAt = controller.setStartedAt {
                     return ("Set time", Int(context.date.timeIntervalSince(startedAt)))
-                } else if let lastEnd = controller.lastSetEndedAt(for: exercise) {
+                } else if let lastEnd = controller.lastAnySetEndedAt {
                     return ("Rest", Int(context.date.timeIntervalSince(lastEnd)))
                 } else {
                     return ("Ready", 0)

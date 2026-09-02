@@ -174,6 +174,59 @@ jobs:
           rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
           zip -qr "NOOP-ios-unsigned-v${VER}.ipa" Payload
           gh release upload "${{ needs.meta.outputs.tag }}" "NOOP-ios-unsigned-v${VER}.ipa" --repo "$GITHUB_REPOSITORY" --clobber
+      # Lets AltStore/SideStore offer this build as an in-place UPDATE instead of requiring a manual
+      # delete-and-reinstall each time: a source with a version string that changes on every run (the
+      # 7-char sha) is exactly what an update check needs to see something newer than what's already
+      # on-device. Point AltStore/SideStore at this ONE stable URL (Sources → + →
+      # https://github.com/<owner>/<repo>/releases/download/testing-latest/altstore-source.json) once;
+      # from then on "Refresh"/"Update" re-signs the newest build automatically, no manual reinstall.
+      - name: Publish a fresh AltStore/SideStore update source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.meta.outputs.ver }}
+        run: |
+          IPA="NOOP-ios-unsigned-v${VER}.ipa"
+          SIZE=$(stat -f%z "$IPA")
+          DATE=$(date -u +%Y-%m-%d)
+          SHA="${GITHUB_SHA:0:7}"
+          REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+          cat > altstore-source.json <<JSON
+          {
+            "name": "NOOP (fork testing)",
+            "identifier": "com.noopapp.noop.altstore.staging",
+            "sourceURL": "${REPO_URL}/releases/download/testing-latest/altstore-source.json",
+            "subtitle": "Rolling testing builds — refreshed on every CI run.",
+            "iconURL": "${REPO_URL}/raw/main/Strand/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512.png",
+            "website": "${REPO_URL}",
+            "tintColor": "44E2B0",
+            "apps": [
+              {
+                "name": "NOOP",
+                "bundleIdentifier": "com.noopapp.noop",
+                "developerName": "NoopApp",
+                "subtitle": "Rolling testing build.",
+                "localizedDescription": "Testing build from ${REPO_URL}. Rebuilt on demand; the version string changes every run so AltStore/SideStore always sees this as an update, never a reinstall.",
+                "iconURL": "${REPO_URL}/raw/main/Strand/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512.png",
+                "tintColor": "44E2B0",
+                "category": "healthcare-fitness",
+                "screenshotURLs": [],
+                "versions": [
+                  {
+                    "version": "${VER}",
+                    "buildVersion": "${DATE}-${SHA}",
+                    "date": "${DATE}",
+                    "localizedDescription": "Base app version ${VER}, built ${DATE} (${SHA}).",
+                    "downloadURL": "${REPO_URL}/releases/download/testing-latest/${IPA}",
+                    "size": ${SIZE},
+                    "minOSVersion": "17.0"
+                  }
+                ]
+              }
+            ]
+          }
+          JSON
+          python3 -c "import json; json.load(open('altstore-source.json'))"
+          gh release upload "${{ needs.meta.outputs.tag }}" altstore-source.json --repo "$GITHUB_REPOSITORY" --clobber
 
   # Fork-only housekeeping: the disposable `noop-staging` branch exists ONLY to feed this build. Once every
   # platform job has finished (pass OR fail — always()), delete it so GitHub's "Compare & pull request"

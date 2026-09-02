@@ -33,7 +33,15 @@ final class TemplateStoreTests: XCTestCase {
     }
 
     func testSchemaVersionIs21() {
-        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 21)
+        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 22)
+    }
+
+    // MARK: - v45 migration (additive: nullable rest-timer-target column on strengthTemplate)
+
+    func testV45AddsRestTargetSecondsColumn() async throws {
+        let store = try await WhoopStore.inMemory()
+        let cols = try await store.columnNamesForTest(table: "strengthTemplate")
+        XCTAssertTrue(cols.contains("restTargetSeconds"), "strengthTemplate missing v45 restTargetSeconds column")
     }
 
     // MARK: - CRUD
@@ -71,5 +79,17 @@ final class TemplateStoreTests: XCTestCase {
         XCTAssertTrue(deleted)
         let all = try await store.templates(deviceId: WhoopStore.strengthLogSourceId)
         XCTAssertEqual(all.count, 0)
+    }
+
+    func testRestTargetSecondsRoundTripsThroughUpsertAndRead() async throws {
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertTemplate(StrengthTemplateRow(
+            id: "a", deviceId: WhoopStore.strengthLogSourceId, name: "Push Day", planJSON: "[]",
+            createdAt: 1, updatedAt: 1, restTargetSeconds: 90
+        ))
+
+        let all = try await store.templates(deviceId: WhoopStore.strengthLogSourceId)
+        XCTAssertEqual(all.count, 1)
+        XCTAssertEqual(all[0].restTargetSeconds, 90)
     }
 }

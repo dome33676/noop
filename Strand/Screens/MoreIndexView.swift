@@ -81,6 +81,7 @@ struct MoreIndexView: View {
                     // ones people reach for when a strap is running down, so they get their own row.
                     MoreRow("Power saving", "battery.25", .powerSaving)
                     MoreRow("Settings", "gearshape.fill", .settings)
+                    MoreRow("Food Goals", "target", .foodGoals)
                 }
             }
             .navigationDestination(for: MoreDestination.self) { route in
@@ -161,7 +162,7 @@ private enum MoreDestination: Hashable {
     case insightsHub, intelligence, coach, insights, explore, compare
     case live, workouts, health, labBook, stress, breathe, intervals, rhythm
     case fusedRecord, appleHealth, miBand, dataSources, backupSync, shortcutsExport, noopLimitations
-    case alarms, automations, testCentre, siriShortcuts, powerSaving, settings
+    case alarms, automations, testCentre, siriShortcuts, powerSaving, settings, foodGoals
 
     @ViewBuilder var destination: some View {
         switch self {
@@ -192,6 +193,7 @@ private enum MoreDestination: Hashable {
         case .siriShortcuts:   SiriShortcutsSettingsView()
         case .powerSaving:     PowerSavingView()
         case .settings:        SettingsView()
+        case .foodGoals:       FoodSettingsView()
         }
     }
 }

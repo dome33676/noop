@@ -16,6 +16,7 @@ struct TemplateEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var plan: [TemplateExercisePlan]
+    @State private var restTargetSeconds: Int
     @State private var showAddExercise = false
 
     init(editing: StrengthTemplateRow? = nil, onSave: @escaping (StrengthTemplateRow) -> Void) {
@@ -23,6 +24,7 @@ struct TemplateEditorView: View {
         self.onSave = onSave
         _name = State(initialValue: editing?.name ?? "")
         _plan = State(initialValue: editing?.plan ?? [])
+        _restTargetSeconds = State(initialValue: editing?.restTargetSeconds ?? ActiveTrainingController.defaultRestTargetSeconds)
     }
 
     var body: some View {
@@ -35,6 +37,15 @@ struct TemplateEditorView: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                         .padding(.horizontal, 12).padding(.vertical, 9)
                         .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                field("Rest timer") {
+                    Picker("", selection: $restTargetSeconds) {
+                        ForEach([30, 45, 60, 90, 120, 150, 180, 240], id: \.self) { seconds in
+                            Text(ActiveWorkoutClock.clock(seconds)).tag(seconds)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
                 }
                 ForEach($plan, id: \.exerciseName) { $exercisePlan in
                     exerciseCard($exercisePlan)
@@ -143,7 +154,8 @@ struct TemplateEditorView: View {
             name: name.trimmingCharacters(in: .whitespaces),
             planJSON: StrengthTemplateRow.encode(plan),
             createdAt: editing?.createdAt ?? now,
-            updatedAt: now
+            updatedAt: now,
+            restTargetSeconds: restTargetSeconds
         )
         onSave(template)
         dismiss()
