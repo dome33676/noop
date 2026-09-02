@@ -1,17 +1,20 @@
 import SwiftUI
 import StrandDesign
 import WhoopStore
+import StrandAnalytics
 
 // MARK: - Food tab
 //
-// A day-diary over the food library: totals vs goals, meals grouped by type, log/edit/delete. Built
-// from the locked Noop component system (NoopCard / StatTile / DayNavBar), matching Workouts rather
-// than the "liquid" tabs — Food has no hero gauge, just numbers and a list, so the plainer surface is
-// the honest fit. Entries are resolved against the food library client-side (loaded once per reload)
-// so the totals shown always match the rows shown beneath them, with no second read that could disagree.
+// A day-diary over the food library: a liquid ring for calories eaten vs. a goal-derived target
+// (mirrors `HydrationView`'s `LiquidVessel` + `CountUpText` hero — "current vs. goal", the same
+// shape hydration already uses, not a 0-100 score like Sleep's `LiquidScoreGauge`), macro bars via
+// the shared `PipBarRow`, a daily energy-balance card with a 7-day bar chart, then meals grouped by
+// type. Entries are resolved against the food library client-side (loaded once per reload) so the
+// totals shown always match the rows shown beneath them, with no second read that could disagree.
 
 struct FoodView: View {
     @EnvironmentObject var repo: Repository
+    @EnvironmentObject var profile: ProfileStore
 
     @State private var dayOffset = 0
     @State private var entries: [MealEntryRow] = []
@@ -26,10 +29,26 @@ struct FoodView: View {
     @AppStorage("foodGoalProteinG") private var goalProtein = 150.0
     @AppStorage("foodGoalCarbsG") private var goalCarbs = 250.0
     @AppStorage("foodGoalFatG") private var goalFat = 70.0
+    @AppStorage("foodGoalKind") private var goalKindRaw = CalorieGoalKind.maintain.rawValue
+
+    @State private var heroFraction: Double = 0
+    /// (BMR + active kcal) for each of the last few PAST days that had Apple Health active-kcal data
+    /// — the measured-TDEE input for `CalorieTarget`. Empty until enough days accumulate.
+    @State private var recentDailyBurns: [Double] = []
+    @State private var weeklyBalance: [EnergyBalanceDay] = []
+    @State private var todayActiveKcal: Double = 0
 
     private var today: Date { Date() }
     private var day: String {
         Repository.localDayKey(Calendar.current.date(byAdding: .day, value: -dayOffset, to: today) ?? today)
+    }
+    private var goalKind: CalorieGoalKind { CalorieGoalKind(rawValue: goalKindRaw) ?? .maintain }
+    private var bmr: Double {
+        CalorieTarget.bmr(sex: profile.sex, weightKg: profile.weightKg, heightCm: profile.heightCm, age: profile.age)
+    }
+    private var fraction: Double { goalKcal > 0 ? min(1.0, max(0.0, totals.kcal / goalKcal)) : 0 }
+    private var todayBalance: Double {
+        EnergyBalance.dailyBalance(bmr: bmr, activeKcal: todayActiveKcal, eatenKcal: totals.kcal)
     }
 
     var body: some View {
@@ -40,11 +59,20 @@ struct FoodView: View {
                     dayOffset = newOffset
                     Task { await reload() }
                 }
-                totalsSection
+                goalPicker
+                ringSection
+                macrosSection
+                if dayOffset == 0 { energyBalanceSection }
                 mealsSection
                 NoopButton("Log meal", systemImage: "plus", kind: .primary, fullWidth: true) {
                     showLogSheet = true
                 }
+            }
+            .onChangeCompat(of: fraction) { newFraction in
+                withAnimation(.easeOut(duration: 0.9)) { heroFraction = newFraction }
+            }
+            .onAppear {
+                withAnimation(.easeOut(duration: 0.9)) { heroFraction = fraction }
             }
         }
         .task(id: dayOffset) { await reload() }
@@ -63,40 +91,107 @@ struct FoodView: View {
         }
     }
 
-    // MARK: - Totals vs goals
+    // MARK: - Goal picker (drives the suggested calorie target)
 
-    private var totals: (kcal: Double, protein: Double, carbs: Double, fat: Double) {
-        entries.reduce((0.0, 0.0, 0.0, 0.0)) { acc, entry in
-            guard let food = foodsById[entry.foodItemId] else { return acc }
-            let scale = entry.quantityGrams / 100.0
-            return (
-                acc.0 + scale * (food.kcalPer100g ?? 0),
-                acc.1 + scale * (food.proteinPer100g ?? 0),
-                acc.2 + scale * (food.carbsPer100g ?? 0),
-                acc.3 + scale * (food.fatPer100g ?? 0)
-            )
+    private var goalPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Goal", selection: Binding(
+                get: { goalKind },
+                set: { newKind in
+                    goalKindRaw = newKind.rawValue
+                    goalKcal = CalorieTarget.targetKcal(bmr: bmr, recentDailyBurns: recentDailyBurns, goal: newKind)
+                }
+            )) {
+                ForEach(CalorieGoalKind.allCases) { kind in Text(kind.label).tag(kind) }
+            }
+            .pickerStyle(.segmented)
+            Text(recentDailyBurns.count >= CalorieTarget.minDaysForMeasuredTDEE
+                 ? "Target based on your last \(recentDailyBurns.count) days' measured burn."
+                 : "Target based on an estimate — measured burn kicks in after a few more days of data.")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textTertiary)
         }
     }
 
-    private var totalsSection: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            HStack {
-                Text("Today's totals").strandOverline()
-                Spacer()
+    // MARK: - Hero ring (calories eaten vs. goal)
+
+    private var ringSection: some View {
+        NoopCard {
+            VStack(spacing: NoopMetrics.cardInnerSpacing) {
+                ZStack {
+                    LiquidVessel(value: heroFraction, tint: StrandPalette.metricAmber, animated: true)
+                        .frame(width: 184, height: 184)
+                    VStack(spacing: 2) {
+                        CountUpText(value: totals.kcal,
+                                    format: { String(Int($0.rounded())) },
+                                    font: StrandFont.rounded(40, weight: .bold),
+                                    color: StrandPalette.textPrimary)
+                            .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
+                        Text("of \(Int(goalKcal)) kcal")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                    }
+                    .allowsHitTesting(false)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Calories today")
+                .accessibilityValue("\(Int(totals.kcal.rounded())) of \(Int(goalKcal)) kcal")
                 Button("Edit goals") { showGoalsSheet = true }
                     .font(StrandFont.footnote)
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: NoopMetrics.gap)],
-                     alignment: .leading, spacing: NoopMetrics.gap) {
-                StatTile(label: "Calories", value: "\(Int(totals.kcal.rounded()))",
-                         caption: "of \(Int(goalKcal)) kcal", accent: StrandPalette.metricAmber)
-                StatTile(label: "Protein", value: "\(Int(totals.protein.rounded()))g",
-                         caption: "of \(Int(goalProtein))g", accent: StrandPalette.textPrimary)
-                StatTile(label: "Carbs", value: "\(Int(totals.carbs.rounded()))g",
-                         caption: "of \(Int(goalCarbs))g", accent: StrandPalette.metricCyan)
-                StatTile(label: "Fat", value: "\(Int(totals.fat.rounded()))g",
-                         caption: "of \(Int(goalFat))g", accent: StrandPalette.effortColor)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    // MARK: - Macro bars
+
+    private var macrosSection: some View {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                PipBarRow(label: "Protein", value: totals.protein, range: 0...max(goalProtein, totals.protein, 1),
+                         tint: StrandPalette.textPrimary, valueText: "\(Int(totals.protein.rounded()))",
+                         unit: "of \(Int(goalProtein))g")
+                PipBarRow(label: "Carbs", value: totals.carbs, range: 0...max(goalCarbs, totals.carbs, 1),
+                         tint: StrandPalette.metricCyan, valueText: "\(Int(totals.carbs.rounded()))",
+                         unit: "of \(Int(goalCarbs))g")
+                PipBarRow(label: "Fat", value: totals.fat, range: 0...max(goalFat, totals.fat, 1),
+                         tint: StrandPalette.effortColor, valueText: "\(Int(totals.fat.rounded()))",
+                         unit: "of \(Int(goalFat))g")
             }
+        }
+    }
+
+    // MARK: - Energy balance (today's actual deficit/surplus + 7-day chart)
+
+    private var energyBalanceSection: some View {
+        let isDeficit = todayBalance >= 0
+        let color = isDeficit ? StrandPalette.statusPositive : StrandPalette.statusWarning
+        return ChartCard(
+            title: "ENERGY BALANCE",
+            subtitle: "Resting + active burn, minus what you ate",
+            tint: color
+        ) {
+            if weeklyBalance.count >= 2 {
+                let values = weeklyBalance.map(\.balanceKcal)
+                let lo = min(0, values.min() ?? 0) - 100
+                let hi = max(0, values.max() ?? 0) + 100
+                TrendChart(
+                    points: weeklyBalance.map { TrendPoint(date: $0.date, value: $0.balanceKcal) },
+                    gradient: Gradient(colors: [color.opacity(0.5), color]),
+                    valueRange: lo...hi,
+                    showsArea: false,
+                    showsBars: true,
+                    valueFormat: { String(Int($0.rounded())) + " kcal" }
+                )
+            } else {
+                Text("Not enough data yet for a weekly view.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+        } footer: {
+            ChartFooter([
+                ("Today", isDeficit ? "−\(Int(todayBalance.rounded())) kcal saved" : "+\(Int((-todayBalance).rounded())) kcal over"),
+            ])
         }
     }
 
@@ -170,6 +265,21 @@ struct FoodView: View {
         .padding(.vertical, 6)
     }
 
+    // MARK: - Totals
+
+    private var totals: (kcal: Double, protein: Double, carbs: Double, fat: Double) {
+        entries.reduce((0.0, 0.0, 0.0, 0.0)) { acc, entry in
+            guard let food = foodsById[entry.foodItemId] else { return acc }
+            let scale = entry.quantityGrams / 100.0
+            return (
+                acc.0 + scale * (food.kcalPer100g ?? 0),
+                acc.1 + scale * (food.proteinPer100g ?? 0),
+                acc.2 + scale * (food.carbsPer100g ?? 0),
+                acc.3 + scale * (food.fatPer100g ?? 0)
+            )
+        }
+    }
+
     // MARK: - Data
 
     private func reload() async {
@@ -180,6 +290,38 @@ struct FoodView: View {
         let library = await libraryTask
         foodsById = Dictionary(uniqueKeysWithValues: library.map { ($0.id, $0) })
         loaded = true
+        if dayOffset == 0 { await reloadEnergyData() }
+    }
+
+    /// Builds the measured-TDEE input, today's active kcal, and the 7-day balance series from Apple
+    /// Health's daily aggregates + the food log's projected daily totals — both already keyed by the
+    /// same `yyyy-MM-dd` local-day string (`Repository.dayString`/`localDayKey` share one format).
+    private func reloadEnergyData() async {
+        async let appleDailyTask = repo.appleDailyRows(days: 10)
+        async let eatenTask = repo.foodMetricSeries(key: "food_calories_in_kcal", days: 10)
+        let appleDaily = await appleDailyTask
+        let eaten = await eatenTask
+
+        var activeByDay: [String: Double] = [:]
+        for row in appleDaily where row.activeKcal != nil { activeByDay[row.day] = row.activeKcal }
+        let eatenByDay = Dictionary(uniqueKeysWithValues: eaten.map { ($0.day, $0.value) })
+
+        let todayKey = Repository.localDayKey(Date())
+        todayActiveKcal = activeByDay[todayKey] ?? 0
+
+        let bmrValue = bmr
+        let pastDaysWithData = activeByDay.keys.filter { $0 != todayKey }.sorted().suffix(7)
+        recentDailyBurns = pastDaysWithData.compactMap { activeByDay[$0] }.map { bmrValue + $0 }
+
+        var series: [EnergyBalanceDay] = []
+        for offset in stride(from: 6, through: 0, by: -1) {
+            guard let date = Calendar.current.date(byAdding: .day, value: -offset, to: Date()) else { continue }
+            let key = Repository.localDayKey(date)
+            let balance = EnergyBalance.dailyBalance(
+                bmr: bmrValue, activeKcal: activeByDay[key] ?? 0, eatenKcal: eatenByDay[key] ?? 0)
+            series.append(EnergyBalanceDay(day: key, date: date, balanceKcal: balance))
+        }
+        weeklyBalance = series
     }
 }
 
@@ -210,6 +352,9 @@ private struct FoodGoalsSheet: View {
             Text("Daily goals")
                 .font(StrandFont.title2)
                 .foregroundStyle(StrandPalette.textPrimary)
+            Text("Calories default to a suggestion based on your profile and goal — edit here to override it.")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
             goalField("Calories", text: $kcalText, unit: "kcal")
             goalField("Protein", text: $proteinText, unit: "g")
             goalField("Carbs", text: $carbsText, unit: "g")
@@ -229,7 +374,7 @@ private struct FoodGoalsSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(StrandPalette.surfaceBase.ignoresSafeArea())
         #if os(iOS)
-        .presentationDetents([.height(360)])
+        .presentationDetents([.height(400)])
         .presentationDragIndicator(.visible)
         #endif
     }

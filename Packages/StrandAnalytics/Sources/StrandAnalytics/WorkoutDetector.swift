@@ -642,6 +642,14 @@ public enum Calories {
         return max(0.0, bmr) / 86_400.0
     }
 
+    /// Daily basal/resting energy expenditure (kcal/day) via the same revised Harris–Benedict model
+    /// `restingKcalPerS` already uses internally for workout estimates — a `public` entry point so a
+    /// plain "what's my BMR" figure (e.g. a food-tracking calorie target) doesn't need its own copy
+    /// of the formula or coefficients.
+    public static func dailyRestingKcal(sex: String, weightKg: Double, heightCm: Double, age: Double) -> Double {
+        restingKcalPerS(resolveCoeffs(sex), weightKg: weightKg, heightCm: heightCm, age: age) * 86_400.0
+    }
+
     /// Uth–Sørensen VO2max estimate (ml·kg⁻¹·min⁻¹) ≈ 15.3 · HRmax / HRrest. Returns nil when no
     /// usable resting HR — the caller then keeps the base (fitness-blind) Keytel model, so a strap
     /// with no resting baseline is scored exactly as before. A function of HRmax + resting HR ONLY,
