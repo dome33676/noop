@@ -8,7 +8,7 @@ import StrandAnalytics
 // A day-diary over the food library: a liquid ring for calories eaten vs. a goal-derived target
 // (mirrors `HydrationView`'s `LiquidVessel` + `CountUpText` hero — "current vs. goal", the same
 // shape hydration already uses, not a 0-100 score like Sleep's `LiquidScoreGauge`), macro bars via
-// the shared `PipBarRow`, a daily energy-balance card with a 7-day bar chart, then meals grouped by
+// the shared `PipBarRow`, a daily energy-balance bar (burned vs. eaten), then meals grouped by
 // type. Entries are resolved against the food library client-side (loaded once per reload) so the
 // totals shown always match the rows shown beneath them, with no second read that could disagree.
 
@@ -35,7 +35,6 @@ struct FoodView: View {
     /// (BMR + active kcal) for each of the last few PAST days that had Apple Health active-kcal data
     /// — the measured-TDEE input for `CalorieTarget`. Empty until enough days accumulate.
     @State private var recentDailyBurns: [Double] = []
-    @State private var weeklyBalance: [EnergyBalanceDay] = []
     @State private var todayActiveKcal: Double = 0
 
     private var today: Date { Date() }
@@ -166,37 +165,26 @@ struct FoodView: View {
         .frame(maxWidth: .infinity)
     }
 
-    // MARK: - Energy balance (today's actual deficit/surplus + 7-day chart)
+    // MARK: - Energy balance (today's actual deficit/surplus)
 
     private var energyBalanceSection: some View {
+        let burnedToday = bmr + todayActiveKcal
         let isDeficit = todayBalance >= 0
         let color = isDeficit ? StrandPalette.statusPositive : StrandPalette.statusWarning
-        return ChartCard(
-            title: "ENERGY BALANCE",
-            subtitle: "Resting + active burn, minus what you ate",
-            tint: color
-        ) {
-            if weeklyBalance.count >= 2 {
-                let values = weeklyBalance.map(\.balanceKcal)
-                let lo = min(0, values.min() ?? 0) - 100
-                let hi = max(0, values.max() ?? 0) + 100
-                TrendChart(
-                    points: weeklyBalance.map { TrendPoint(date: $0.date, value: $0.balanceKcal) },
-                    gradient: Gradient(colors: [color.opacity(0.5), color]),
-                    valueRange: lo...hi,
-                    showsArea: false,
-                    showsBars: true,
-                    valueFormat: { String(Int($0.rounded())) + " kcal" }
-                )
-            } else {
-                Text("Not enough data yet for a weekly view.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
+        return NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                Text("ENERGY BALANCE").strandOverline()
+                HStack {
+                    Text("\(Int(burnedToday.rounded())) kcal burned today")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    Spacer(minLength: 8)
+                    Text(isDeficit ? "−\(Int(todayBalance.rounded())) kcal deficit" : "+\(Int((-todayBalance).rounded())) kcal surplus")
+                        .font(StrandFont.subhead.weight(.semibold))
+                        .foregroundStyle(color)
+                }
+                PipBar(value: totals.kcal, range: 0...max(burnedToday, totals.kcal, 1), segments: 20, tint: color, height: 7)
             }
-        } footer: {
-            ChartFooter([
-                ("Today", isDeficit ? "−\(Int(todayBalance.rounded())) kcal saved" : "+\(Int((-todayBalance).rounded())) kcal over"),
-            ])
         }
     }
 
@@ -391,18 +379,14 @@ struct FoodView: View {
         if dayOffset == 0 { await reloadEnergyData() }
     }
 
-    /// Builds the measured-TDEE input, today's active kcal, and the 7-day balance series from Apple
-    /// Health's daily aggregates + the food log's projected daily totals — both already keyed by the
-    /// same `yyyy-MM-dd` local-day string (`Repository.dayString`/`localDayKey` share one format).
+    /// Builds the measured-TDEE input and today's active kcal from Apple Health's daily aggregates —
+    /// keyed by the same `yyyy-MM-dd` local-day string (`Repository.dayString`/`localDayKey` share one
+    /// format).
     private func reloadEnergyData() async {
-        async let appleDailyTask = repo.appleDailyRows(days: 10)
-        async let eatenTask = repo.foodMetricSeries(key: "food_calories_in_kcal", days: 10)
-        let appleDaily = await appleDailyTask
-        let eaten = await eatenTask
+        let appleDaily = await repo.appleDailyRows(days: 10)
 
         var activeByDay: [String: Double] = [:]
         for row in appleDaily where row.activeKcal != nil { activeByDay[row.day] = row.activeKcal }
-        let eatenByDay = Dictionary(uniqueKeysWithValues: eaten.map { ($0.day, $0.value) })
 
         let todayKey = Repository.localDayKey(Date())
         todayActiveKcal = activeByDay[todayKey] ?? 0
@@ -410,15 +394,5 @@ struct FoodView: View {
         let bmrValue = bmr
         let pastDaysWithData = activeByDay.keys.filter { $0 != todayKey }.sorted().suffix(7)
         recentDailyBurns = pastDaysWithData.compactMap { activeByDay[$0] }.map { bmrValue + $0 }
-
-        var series: [EnergyBalanceDay] = []
-        for offset in stride(from: 6, through: 0, by: -1) {
-            guard let date = Calendar.current.date(byAdding: .day, value: -offset, to: Date()) else { continue }
-            let key = Repository.localDayKey(date)
-            let balance = EnergyBalance.dailyBalance(
-                bmr: bmrValue, activeKcal: activeByDay[key] ?? 0, eatenKcal: eatenByDay[key] ?? 0)
-            series.append(EnergyBalanceDay(day: key, date: date, balanceKcal: balance))
-        }
-        weeklyBalance = series
     }
 }

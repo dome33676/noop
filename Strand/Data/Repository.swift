@@ -2604,19 +2604,6 @@ final class Repository: ObservableObject {
         _ = try? await store.deleteMealEntry(id: id)
     }
 
-    /// One food-log metricSeries key (e.g. `"food_calories_in_kcal"`) over the last `days`,
-    /// oldest-first, as plain (day, value) pairs — the daily rollups `FoodStore` already projects,
-    /// not a re-sum of meal entries.
-    func foodMetricSeries(key: String, days: Int) async -> [(day: String, value: Double)] {
-        guard let store = await ensureStore() else { return [] }
-        let now = Date()
-        let from = Self.dayString(now.addingTimeInterval(-Double(days) * 86_400))
-        let to = Self.dayString(now)
-        let points = (try? await store.metricSeries(deviceId: WhoopStore.foodLogSourceId, key: key,
-                                                     from: from, to: to)) ?? []
-        return points.map { ($0.day, $0.value) }
-    }
-
     // MARK: - Strength training
 
     /// Sessions in the last `days`, newest first.
