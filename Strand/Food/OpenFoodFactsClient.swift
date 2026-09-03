@@ -1,11 +1,10 @@
 import Foundation
 
-/// Opt-in lookup against the free, public Open Food Facts API (world.openfoodfacts.org) — search by
-/// name or fetch by barcode, so a food-library item can be pre-filled instead of typed by hand. This
-/// is NOOP's fifth network exception (see docs/PRIVACY_SECURITY.md §1.1e): OFF is a third-party,
-/// crowd-sourced product database, not a NOOP-operated service. Only the search term or barcode is
-/// sent, over plain HTTPS, and nothing about the user, their WHOOP, or their food log goes with it.
-/// OFF requires no API key.
+/// Opt-in lookup against the free, public Open Food Facts API — search by name or fetch by barcode,
+/// so a food-library item can be pre-filled instead of typed by hand. This is NOOP's fifth network
+/// exception (see docs/PRIVACY_SECURITY.md §1.1e): OFF is a third-party, crowd-sourced product
+/// database, not a NOOP-operated service. Only the search term or barcode is sent, over plain HTTPS,
+/// and nothing about the user, their WHOOP, or their food log goes with it. OFF requires no API key.
 ///
 /// Follows the `UpdateChecker` idiom: a single unauthenticated `URLSession.shared.data(for:)` GET,
 /// a status-code guard, tolerant decoding, `nil`/`[]` on any failure rather than throwing — a failed
@@ -23,31 +22,52 @@ enum OpenFoodFactsClient {
         let fatPer100g: Double?
     }
 
-    private static let searchEndpoint = "https://world.openfoodfacts.org/cgi/search.pl"
-    private static let productEndpoint = "https://world.openfoodfacts.org/api/v2/product/"
+    struct SearchPage {
+        let products: [Product]
+        let hasMore: Bool
+    }
 
-    /// Search by free-text name. Returns at most `limit` products with a usable name; a request
-    /// timeout, non-200, or malformed response yields an empty list rather than throwing.
-    static func search(query: String, limit: Int = 20) async -> [Product] {
+    // The legacy `world.openfoodfacts.org/cgi/search.pl` endpoint this used to call now regularly
+    // answers with a 503 "temporarily unavailable" bot-wall instead of JSON, and even when it does
+    // respond its plain substring matching treats a multi-word query as a literal AND across fields —
+    // "Apfel Frucht" matched nothing because no product has both words, while "Apfel" alone matched
+    // every product with "Apfel" anywhere in its name (Apfelsaft, Apfelmus, ...) with no relevance
+    // ranking. `search.openfoodfacts.org` is OFF's current Elasticsearch-backed full-text search
+    // (search-a-licious): real relevance ranking, sane multi-word handling, and real pagination via
+    // page/page_size/page_count — verified directly against the live API before switching.
+    private static let searchEndpoint = "https://search.openfoodfacts.org/search"
+    private static let productEndpoint = "https://world.openfoodfacts.org/api/v2/product/"
+    // OFF's API guidelines ask every client to identify itself; the old client sent no User-Agent at
+    // all, which — together with the legacy endpoint's bot-wall — is a second plausible reason lookups
+    // intermittently failed.
+    private static let userAgent = "NOOP-iOS/1.0 (github.com/dome33676/noop)"
+
+    /// One page of free-text results, oldest-relevance-first (OFF's own ranking). `page` is 1-based.
+    /// A request timeout, non-200, or malformed response yields an empty, non-continuing page rather
+    /// than throwing — a failed lookup should read as "no (more) results", never crash the caller.
+    static func search(query: String, page: Int = 1, pageSize: Int = 20) async -> SearchPage {
         var components = URLComponents(string: searchEndpoint)!
         components.queryItems = [
-            URLQueryItem(name: "search_terms", value: query),
-            URLQueryItem(name: "search_simple", value: "1"),
-            URLQueryItem(name: "action", value: "process"),
-            URLQueryItem(name: "json", value: "1"),
-            URLQueryItem(name: "page_size", value: String(limit)),
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "page", value: String(page)),
+            URLQueryItem(name: "page_size", value: String(pageSize)),
+            URLQueryItem(name: "fields", value: "product_name,code,nutriments"),
         ]
-        guard let url = components.url else { return [] }
+        guard let url = components.url else { return SearchPage(products: [], hasMore: false) }
         do {
             var req = URLRequest(url: url, timeoutInterval: 12)
             req.setValue("application/json", forHTTPHeaderField: "Accept")
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard (resp as? HTTPURLResponse)?.statusCode == 200,
                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let products = json["products"] as? [[String: Any]] else { return [] }
-            return products.compactMap(decode)
+                  let hits = json["hits"] as? [[String: Any]] else {
+                return SearchPage(products: [], hasMore: false)
+            }
+            let pageCount = json["page_count"] as? Int ?? page
+            return SearchPage(products: hits.compactMap(decode), hasMore: page < pageCount)
         } catch {
-            return []
+            return SearchPage(products: [], hasMore: false)
         }
     }
 
@@ -57,6 +77,7 @@ enum OpenFoodFactsClient {
         do {
             var req = URLRequest(url: url, timeoutInterval: 12)
             req.setValue("application/json", forHTTPHeaderField: "Accept")
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard (resp as? HTTPURLResponse)?.statusCode == 200,
                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],

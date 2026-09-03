@@ -192,9 +192,9 @@ struct FoodItemEditorSheet: View {
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled else { return }
             offSearching = true
-            let results = await OpenFoodFactsClient.search(query: trimmed)
+            let page = await OpenFoodFactsClient.search(query: trimmed)
             guard !Task.isCancelled else { return }
-            offResults = results
+            offResults = page.products
             offSearching = false
         }
     }

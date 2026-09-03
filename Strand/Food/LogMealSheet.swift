@@ -23,6 +23,7 @@ struct LogMealSheet: View {
 
     @EnvironmentObject private var repo: Repository
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("foodOpenFoodFactsEnabled") private var openFoodFactsEnabled = false
 
     @State private var selectedFood: FoodItemRow?
     @State private var searchQuery = ""
@@ -30,6 +31,17 @@ struct LogMealSheet: View {
     @State private var quantityText: String
     @State private var mealType: FoodMealType
     @State private var showNewFoodSheet = false
+
+    /// Online (Open Food Facts) results for the SAME query, shown inline below the library matches —
+    /// no separate "add food" round trip needed to log something OFF already knows about.
+    @State private var offResults: [OpenFoodFactsClient.Product] = []
+    @State private var offSearching = false
+    @State private var offPage = 1
+    @State private var offHasMore = false
+    @State private var offSearchTask: Task<Void, Never>?
+    /// The online result currently being saved into the library + selected, so its row can show a
+    /// spinner instead of being tappable twice.
+    @State private var savingProduct: OpenFoodFactsClient.Product?
 
     private enum NumberField: Hashable { case quantity }
     @FocusState private var focusedField: NumberField?
@@ -122,51 +134,101 @@ struct LogMealSheet: View {
         }
     }
 
-    // MARK: - Food picker (search the library, or create a new item)
+    // MARK: - Food picker (search the library and, inline, Open Food Facts)
 
     private var foodPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespaces)
+        return VStack(alignment: .leading, spacing: 8) {
             field("Food") {
-                TextField("Search your food library", text: $searchQuery)
+                TextField(openFoodFactsEnabled ? "Search your foods or online" : "Search your food library",
+                          text: $searchQuery)
                     .textFieldStyle(.plain)
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.textPrimary)
                     .padding(.horizontal, 12).padding(.vertical, 9)
                     .background(StrandPalette.surfaceInset, in: inputShape)
                     .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
-                    .onChangeCompat(of: searchQuery) { newValue in Task { await search(newValue) } }
+                    .onChangeCompat(of: searchQuery) { newValue in
+                        Task { await search(newValue) }
+                        scheduleOffSearch(newValue)
+                    }
                     .task { await search("") }
             }
             if !searchResults.isEmpty {
-                VStack(spacing: 0) {
+                resultsList(title: openFoodFactsEnabled && !offResults.isEmpty ? "Your foods" : nil) {
                     ForEach(Array(searchResults.enumerated()), id: \.element.id) { idx, food in
                         Button { selectedFood = food } label: {
-                            HStack(spacing: 8) {
-                                Text(food.name)
-                                    .font(StrandFont.body)
-                                    .foregroundStyle(StrandPalette.textPrimary)
-                                Spacer(minLength: 8)
-                                if let kcal = food.kcalPer100g {
-                                    Text("\(Int(kcal.rounded())) kcal/100g")
-                                        .font(StrandFont.footnote)
-                                        .foregroundStyle(StrandPalette.textTertiary)
-                                }
-                            }
-                            .contentShape(Rectangle())
-                            .padding(.vertical, 8)
+                            resultRow(name: food.name, kcalPer100g: food.kcalPer100g)
                         }
                         .buttonStyle(.plain)
                         if idx < searchResults.count - 1 { Divider().opacity(0.4) }
                     }
                 }
-                .padding(.horizontal, 12)
-                .background(StrandPalette.surfaceInset, in: inputShape)
-                .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+            }
+            if openFoodFactsEnabled && !trimmedQuery.isEmpty {
+                onlineResultsSection
             }
             NoopButton("New food", systemImage: "plus", kind: .secondary, fullWidth: true) {
                 showNewFoodSheet = true
             }
         }
+    }
+
+    @ViewBuilder
+    private var onlineResultsSection: some View {
+        if !offResults.isEmpty {
+            resultsList(title: "Online") {
+                ForEach(Array(offResults.enumerated()), id: \.offset) { idx, product in
+                    Button { selectOnline(product) } label: {
+                        resultRow(name: product.name, kcalPer100g: product.kcalPer100g,
+                                  isSaving: savingProduct == product)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(savingProduct != nil)
+                    .onAppear {
+                        if idx == offResults.count - 1 { loadMoreOffResults() }
+                    }
+                    if idx < offResults.count - 1 { Divider().opacity(0.4) }
+                }
+                if offSearching && !offResults.isEmpty {
+                    HStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
+                        .padding(.vertical, 8)
+                }
+            }
+        } else if offSearching {
+            HStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
+                .padding(.vertical, 12)
+        }
+    }
+
+    private func resultsList<Content: View>(title: String?, @ViewBuilder rows: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let title {
+                Text(title).strandOverline()
+            }
+            VStack(spacing: 0) { rows() }
+                .padding(.horizontal, 12)
+                .background(StrandPalette.surfaceInset, in: inputShape)
+                .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+        }
+    }
+
+    private func resultRow(name: String, kcalPer100g: Double?, isSaving: Bool = false) -> some View {
+        HStack(spacing: 8) {
+            Text(name)
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textPrimary)
+            Spacer(minLength: 8)
+            if isSaving {
+                ProgressView().controlSize(.small)
+            } else if let kcalPer100g {
+                Text("\(Int(kcalPer100g.rounded())) kcal/100g")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+        }
+        .contentShape(Rectangle())
+        .padding(.vertical, 8)
     }
 
     private func selectedFoodRow(_ food: FoodItemRow) -> some View {
@@ -189,6 +251,68 @@ struct LogMealSheet: View {
     private func search(_ query: String) async {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         searchResults = trimmed.isEmpty ? await repo.foodItems() : await repo.searchFoodItems(query: trimmed)
+    }
+
+    /// Debounced Open Food Facts search for the same query box, so results appear inline instead of
+    /// requiring the separate "New food" sheet. Resets pagination on every new query.
+    private func scheduleOffSearch(_ query: String) {
+        offSearchTask?.cancel()
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard openFoodFactsEnabled, trimmed.count >= 2 else {
+            offResults = []; offHasMore = false; offSearching = false
+            return
+        }
+        offSearchTask = Task {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            offSearching = true
+            offPage = 1
+            let page = await OpenFoodFactsClient.search(query: trimmed, page: 1)
+            guard !Task.isCancelled else { return }
+            offResults = page.products
+            offHasMore = page.hasMore
+            offSearching = false
+        }
+    }
+
+    /// Fetches the next page and appends — triggered by the last online row's `onAppear`, so scrolling
+    /// to the bottom of what's loaded keeps loading more rather than dead-ending at the first page.
+    private func loadMoreOffResults() {
+        guard offHasMore, !offSearching else { return }
+        let trimmed = searchQuery.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 2 else { return }
+        offSearching = true
+        Task {
+            let nextPage = offPage + 1
+            let page = await OpenFoodFactsClient.search(query: trimmed, page: nextPage)
+            offPage = nextPage
+            offResults += page.products
+            offHasMore = page.hasMore
+            offSearching = false
+        }
+    }
+
+    /// Saves an online result straight into the food library and selects it — the one-tap path the
+    /// separate "New food" → OFF-search → "Add" round trip used to require.
+    private func selectOnline(_ product: OpenFoodFactsClient.Product) {
+        guard savingProduct == nil else { return }
+        savingProduct = product
+        Task {
+            let item = FoodItemRow(
+                id: UUID().uuidString,
+                deviceId: WhoopStore.foodLogSourceId,
+                name: product.name,
+                kcalPer100g: product.kcalPer100g,
+                proteinPer100g: product.proteinPer100g,
+                carbsPer100g: product.carbsPer100g,
+                fatPer100g: product.fatPer100g,
+                barcode: product.barcode,
+                createdAt: Int(Date().timeIntervalSince1970)
+            )
+            await repo.saveFoodItem(item)
+            selectedFood = item
+            savingProduct = nil
+        }
     }
 
     // MARK: - Sections
