@@ -328,9 +328,6 @@ struct RootView: View {
             case .liveSession: selection = .today
             // The #627 Today journal widget routes to the Insights sidebar row (which hosts the journal card).
             case .journal: selection = .insights
-            // Food is an iOS-tab-only screen (the Food widget's deep link is iOS-only); macOS has no
-            // sidebar destination for it, so this is a no-op here.
-            case .food: break
             case nil: break
             }
             if dest != nil { router.requestedDestination = nil }

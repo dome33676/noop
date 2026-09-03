@@ -190,11 +190,6 @@ struct RootTabView: View {
                 // (InsightsView), matching the FAB's "Log journal" action. Calm sheet easing.
                 withAnimation(Self.sheetEase) { quickAction = .journal }
                 router.requestedDestination = nil
-            case .food:
-                // The Food widget's "+" deep-links here. Food is a primary tab; FoodView itself consumes
-                // `router.pendingLogMealType` on appear to open the log sheet preset to that meal.
-                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 3 }
-                router.requestedDestination = nil
             case nil:
                 break
             }
@@ -264,9 +259,6 @@ struct RootTabView: View {
                 // .journal opens through the quick-action Journal sheet (handled above); this keeps the
                 // switch exhaustive and falls back to the journal's Insights host if it ever reaches here.
                 case .journal: InsightsView()
-                // .food is a primary tab, routed via `selectedTab` above (handled above); this keeps the
-                // switch exhaustive and falls back to Food if it ever reaches the pillar host.
-                case .food: FoodView()
                 }
             }
             // The Trends/Today fallbacks above emit TabRoute value pushes (#198), which need a
