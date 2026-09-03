@@ -15,6 +15,7 @@ import StrandAnalytics
 struct FoodView: View {
     @EnvironmentObject var repo: Repository
     @EnvironmentObject var profile: ProfileStore
+    @EnvironmentObject var router: NavRouter
 
     @State private var dayOffset = 0
     @State private var entries: [MealEntryRow] = []
@@ -66,6 +67,12 @@ struct FoodView: View {
             }
             .onAppear {
                 withAnimation(.easeOut(duration: 0.9)) { heroFraction = fraction }
+                // The Food widget's per-meal "+" deep-links here via NavRouter (noop://log-meal).
+                // Consumed once on arrival, then cleared, mirroring InsightsView's pendingJournalDayOffset.
+                if let type = router.pendingLogMealType {
+                    quickAddMealType = type
+                    router.pendingLogMealType = nil
+                }
             }
         }
         // Pinned above the tab bar, overlaid into the bottom scroll clearance `ScreenScaffold`
@@ -376,7 +383,15 @@ struct FoodView: View {
         let library = await libraryTask
         foodsById = Dictionary(uniqueKeysWithValues: library.map { ($0.id, $0) })
         loaded = true
-        if dayOffset == 0 { await reloadEnergyData() }
+        if dayOffset == 0 {
+            await reloadEnergyData()
+            #if os(iOS)
+            FoodWidgetPublish.publish(
+                breakfastKcal: eatenKcal(for: .breakfast), lunchKcal: eatenKcal(for: .lunch),
+                dinnerKcal: eatenKcal(for: .dinner), snackKcal: eatenKcal(for: .snack), goalKcal: goalKcal
+            )
+            #endif
+        }
     }
 
     /// Builds the measured-TDEE input and today's active kcal from Apple Health's daily aggregates —
