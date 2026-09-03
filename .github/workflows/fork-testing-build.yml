@@ -227,11 +227,21 @@ jobs:
           DATE=$(date -u +%Y-%m-%d)
           SHA="${GITHUB_SHA:0:7}"
           REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+          # sourceURL points at raw.githubusercontent.com (a dedicated `altstore-source` branch), NOT a
+          # releases/download URL. A release-asset download is a 302 to a SIGNED, ~1-hour-expiring Azure
+          # Blob URL, freshly minted per request — if AltStore/SideStore's networking layer holds onto that
+          # resolved redirect target and reuses it after it expires, Azure answers with an XML auth error
+          # instead of the file, and decoding that as JSON/plist produces exactly NSCocoaErrorDomain 3840,
+          # "The data couldn't be read because it isn't in the correct format" — on a plain source Refresh,
+          # not just Install, which is what confirmed this (not a version-mismatch or caching-of-content
+          # issue, both already ruled out by this point). raw.githubusercontent.com serves the file
+          # directly with no redirect/signed-URL hop, so there is nothing to expire.
+          RAW_SOURCE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/altstore-source/altstore-source.json"
           cat > altstore-source.json <<JSON
           {
             "name": "NOOP (fork testing)",
             "identifier": "com.noopapp.noop.altstore.staging",
-            "sourceURL": "${REPO_URL}/releases/download/testing-latest/altstore-source.json",
+            "sourceURL": "${RAW_SOURCE_URL}",
             "subtitle": "Rolling testing builds — refreshed on every CI run.",
             "description": "Rolling testing-build source for this fork of NOOP. Refreshed on every CI run so AltStore/SideStore always offers the newest build as an in-place update — no manual delete-and-reinstall.",
             "iconURL": "${REPO_URL}/raw/main/Strand/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512.png",
@@ -271,6 +281,23 @@ jobs:
           JSON
           python3 -c "import json; json.load(open('altstore-source.json'))"
           gh release upload "${{ needs.meta.outputs.tag }}" altstore-source.json --repo "$GITHUB_REPOSITORY" --clobber
+          # Publish the SAME content to the `altstore-source` branch via the Contents API (no local git
+          # state touched) so raw.githubusercontent.com serves it at RAW_SOURCE_URL above.
+          CONTENT_B64=$(base64 < altstore-source.json | tr -d '\n')
+          if ! gh api "repos/${GITHUB_REPOSITORY}/branches/altstore-source" >/dev/null 2>&1; then
+            MAIN_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/heads/altstore-source" -f sha="$MAIN_SHA" >/dev/null
+          fi
+          EXISTING_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/altstore-source.json?ref=altstore-source" --jq .sha 2>/dev/null || echo "")
+          if [ -n "$EXISTING_SHA" ]; then
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/altstore-source.json" \
+              -f message="Update altstore-source.json (build ${VER}.${BUILD_NUM})" \
+              -f content="$CONTENT_B64" -f branch="altstore-source" -f sha="$EXISTING_SHA" >/dev/null
+          else
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/altstore-source.json" \
+              -f message="Add altstore-source.json (build ${VER}.${BUILD_NUM})" \
+              -f content="$CONTENT_B64" -f branch="altstore-source" >/dev/null
+          fi
 
   # Fork-only housekeeping: the disposable `noop-staging` branch exists ONLY to feed this build. Once every
   # platform job has finished (pass OR fail — always()), delete it so GitHub's "Compare & pull request"
