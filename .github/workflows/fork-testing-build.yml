@@ -227,16 +227,19 @@ jobs:
           DATE=$(date -u +%Y-%m-%d)
           SHA="${GITHUB_SHA:0:7}"
           REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
-          # sourceURL points at raw.githubusercontent.com (a dedicated `altstore-source` branch), NOT a
-          # releases/download URL. A release-asset download is a 302 to a SIGNED, ~1-hour-expiring Azure
-          # Blob URL, freshly minted per request — if AltStore/SideStore's networking layer holds onto that
-          # resolved redirect target and reuses it after it expires, Azure answers with an XML auth error
-          # instead of the file, and decoding that as JSON/plist produces exactly NSCocoaErrorDomain 3840,
-          # "The data couldn't be read because it isn't in the correct format" — on a plain source Refresh,
-          # not just Install, which is what confirmed this (not a version-mismatch or caching-of-content
-          # issue, both already ruled out by this point). raw.githubusercontent.com serves the file
-          # directly with no redirect/signed-URL hop, so there is nothing to expire.
-          RAW_SOURCE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/altstore-source/altstore-source.json"
+          # Both sourceURL AND downloadURL point at raw.githubusercontent.com (a dedicated
+          # `altstore-source` branch), NOT releases/download URLs. A release-asset download is a 302 to
+          # a SIGNED Azure Blob URL with a long, query-heavy signature — on-device this measurably came
+          # back as an HTML page ("Encountered unknown tag html", NSCocoaErrorDomain 3840) even for a
+          # freshly-generated, byte-correct source and a freshly-verified-good .ipa (confirmed good by
+          # fetching the SAME URL from a completely different network right after the failure), while a
+          # plain source Refresh (no redirect involved once it moved off releases/download) started
+          # working. That isolates the redirect hop itself — not the content, not staleness/expiry — as
+          # what the device's networking stack chokes on for both files equally, so both need to be off
+          # of it. raw.githubusercontent.com serves directly with zero redirects.
+          RAW_BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/altstore-source"
+          RAW_SOURCE_URL="${RAW_BASE_URL}/altstore-source.json"
+          RAW_IPA_URL="${RAW_BASE_URL}/${IPA}"
           cat > altstore-source.json <<JSON
           {
             "name": "NOOP (fork testing)",
@@ -261,7 +264,7 @@ jobs:
                 "version": "${VER}",
                 "versionDate": "${DATE}",
                 "versionDescription": "Base app version ${VER} (build ${BUILD_NUM}), built ${DATE} (${SHA}).",
-                "downloadURL": "${REPO_URL}/releases/download/testing-latest/${IPA}",
+                "downloadURL": "${RAW_IPA_URL}",
                 "size": ${SIZE},
                 "minOSVersion": "17.0",
                 "versions": [
@@ -270,7 +273,7 @@ jobs:
                     "buildVersion": "${BUILD_NUM}",
                     "date": "${DATE}",
                     "localizedDescription": "Base app version ${VER}, built ${DATE} (${SHA}).",
-                    "downloadURL": "${REPO_URL}/releases/download/testing-latest/${IPA}",
+                    "downloadURL": "${RAW_IPA_URL}",
                     "size": ${SIZE},
                     "minOSVersion": "17.0"
                   }
@@ -280,24 +283,24 @@ jobs:
           }
           JSON
           python3 -c "import json; json.load(open('altstore-source.json'))"
+          # Releases still get both files too — a plain browser download (Sideloadly, manual install)
+          # follows redirects fine; only the on-device AltStore/SideStore fetch of a releases/download
+          # URL was the problem.
           gh release upload "${{ needs.meta.outputs.tag }}" altstore-source.json --repo "$GITHUB_REPOSITORY" --clobber
-          # Publish the SAME content to the `altstore-source` branch via the Contents API (no local git
-          # state touched) so raw.githubusercontent.com serves it at RAW_SOURCE_URL above.
-          CONTENT_B64=$(base64 < altstore-source.json | tr -d '\n')
-          if ! gh api "repos/${GITHUB_REPOSITORY}/branches/altstore-source" >/dev/null 2>&1; then
-            MAIN_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
-            gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/heads/altstore-source" -f sha="$MAIN_SHA" >/dev/null
-          fi
-          EXISTING_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/altstore-source.json?ref=altstore-source" --jq .sha 2>/dev/null || echo "")
-          if [ -n "$EXISTING_SHA" ]; then
-            gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/altstore-source.json" \
-              -f message="Update altstore-source.json (build ${VER}.${BUILD_NUM})" \
-              -f content="$CONTENT_B64" -f branch="altstore-source" -f sha="$EXISTING_SHA" >/dev/null
-          else
-            gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/altstore-source.json" \
-              -f message="Add altstore-source.json (build ${VER}.${BUILD_NUM})" \
-              -f content="$CONTENT_B64" -f branch="altstore-source" >/dev/null
-          fi
+          # Publish both files to the `altstore-source` branch so raw.githubusercontent.com serves them
+          # at RAW_SOURCE_URL/RAW_IPA_URL above. Built as a FRESH orphan commit and force-pushed (not an
+          # incremental commit onto the branch's existing history) so a new ~20MB .ipa blob every run
+          # doesn't grow that branch without bound — each push fully replaces the previous one.
+          rm -rf /tmp/altstore-source-branch && mkdir /tmp/altstore-source-branch
+          cp altstore-source.json "$IPA" /tmp/altstore-source-branch/
+          git -C /tmp/altstore-source-branch init -q -b altstore-source
+          git -C /tmp/altstore-source-branch config user.name "github-actions[bot]"
+          git -C /tmp/altstore-source-branch config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C /tmp/altstore-source-branch add -A
+          git -C /tmp/altstore-source-branch commit -q -m "Build ${VER}.${BUILD_NUM} (${SHA})"
+          git -C /tmp/altstore-source-branch push -f \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/altstore-source"
 
   # Fork-only housekeeping: the disposable `noop-staging` branch exists ONLY to feed this build. Once every
   # platform job has finished (pass OR fail — always()), delete it so GitHub's "Compare & pull request"
