@@ -35,12 +35,8 @@ jobs:
           SHA="${GITHUB_SHA:0:7}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
-          # ROLLING release: recreate the single tag so stale (incl. old-version) assets never linger —
-          # one stable URL, always the newest build, zero cleanup. (To KEEP a build, cut a one-off tag.)
-          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --target "${{ github.sha }}" \
-            --title "NOOP Staging — base ${VER} · ${DATE} · ${SHA}" \
-            --notes "Rolling **latest** testing build — refreshed in place, so this tag is always the newest. NOOP main + ryanbr's open PRs + vetted community PRs, built with the **NOOP Staging** identity (installs **beside** the official app, separate data). Filenames carry the base app version (\`v${VER}\`).
+          TITLE="NOOP Staging — base ${VER} · ${DATE} · ${SHA}"
+          NOTES="Rolling **latest** testing build — refreshed in place, so this tag is always the newest. NOOP main + ryanbr's open PRs + vetted community PRs, built with the **NOOP Staging** identity (installs **beside** the official app, separate data). Filenames carry the base app version (\`v${VER}\`).
 
           - **Android (release)** — \`NOOP-android-v${VER}.apk\` — optimized, non-debuggable build; installs beside the official app. \`com.noop.whoop.staging\`.
           - **Android (debug)** — \`NOOP-android-debug-v${VER}.apk\` — debuggable build. \`com.noop.whoop.debug\`.
@@ -48,11 +44,27 @@ jobs:
           - **iOS** — \`NOOP-ios-unsigned-v${VER}.ipa\` — sideload via **AltStore / Sideloadly** (re-signs on-device); embedded watch app stripped, widget extension retained for Home/Lock-Screen widgets and Live Activities.
 
           Base app version ${VER} · built ${DATE} · \`${SHA}\`."
-          # Belt-and-braces: a rolling tag is deleted with --cleanup-tag and recreated seconds later, and
-          # that recreate has come back as a DRAFT — the 9.2.1 staging build did, and a draft release does
-          # not create its tag, so the assets were unreachable and the `testing-latest` URL 404'd until
-          # someone noticed. Whatever the cause (the tag delete is not instant on GitHub's side), asserting
-          # the published state costs one idempotent call and cannot make things worse.
+          # The tag is now edited IN PLACE rather than deleted-and-recreated on every run. Recreating it
+          # briefly invalidated EVERY asset URL — including the previous run's .ipa and, worse, the
+          # `altstore-source.json` URL itself — right as AltStore/SideStore (which cache the source's
+          # content locally and only re-fetch on an explicit "Refresh", not before every install) could be
+          # resolving a still-cached, now-stale reference to it. That produced the exact same "data
+          # couldn't be read"/"version doesn't match" install failure as the version-mismatch bug already
+          # fixed here, just triggered by a completely different mechanism (a dangling URL, not a
+          # mismatched value) and recurring on every subsequent CI run. Editing in place keeps every
+          # asset URL from any past run permanently valid, so a stale AltStore cache always still resolves
+          # to SOMETHING real (possibly not the newest build until the user refreshes, but never a 404).
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --target "${{ github.sha }}" \
+              --title "$TITLE" --notes "$NOTES" --draft=false --prerelease
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --target "${{ github.sha }}" \
+              --title "$TITLE" --notes "$NOTES"
+          fi
+          # Belt-and-braces: earlier versions of this job deleted-and-recreated the tag, and that recreate
+          # sometimes came back as a DRAFT — the 9.2.1 staging build did, and a draft release does not
+          # publish its tag, so the assets were unreachable and the `testing-latest` URL 404'd until someone
+          # noticed. Asserting the published state costs one idempotent call and cannot make things worse.
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
           DRAFT=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft)
           [ "$DRAFT" = "false" ] || { echo "::error::$TAG is still a draft — testers cannot download it."; exit 1; }
