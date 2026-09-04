@@ -31,6 +31,8 @@ struct LogMealSheet: View {
     @State private var quantityText: String
     @State private var mealType: FoodMealType
     @State private var showNewFoodSheet = false
+    @State private var showScanner = false
+    @State private var scanNotFound = false
 
     /// Online (Open Food Facts) results for the SAME query, shown inline below the library matches —
     /// no separate "add food" round trip needed to log something OFF already knows about.
@@ -132,6 +134,32 @@ struct LogMealSheet: View {
                 Task { await repo.saveFoodItem(item); selectedFood = item }
             }
         }
+        .sheet(isPresented: $showScanner) {
+            #if os(iOS)
+            BarcodeScannerScreen { code in
+                Task { await lookupBarcode(code) }
+            }
+            #endif
+        }
+        // A scan that Open Food Facts can't resolve would otherwise be a dead end now that the "New
+        // food" button is gone, so the manual editor stays reachable as the fallback for exactly that
+        // case — offered only when it's actually needed, rather than sitting in the way permanently.
+        .alert("No match found", isPresented: $scanNotFound) {
+            Button("Enter by hand") { showNewFoodSheet = true }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Open Food Facts has no product for that barcode.")
+        }
+    }
+
+    /// Resolves a scanned barcode against Open Food Facts and, on a hit, saves it into the library and
+    /// selects it — the same one-tap outcome as picking an online search result.
+    private func lookupBarcode(_ code: String) async {
+        guard let product = await OpenFoodFactsClient.lookup(barcode: code) else {
+            scanNotFound = true
+            return
+        }
+        selectOnline(product)
     }
 
     // MARK: - Food picker (search the library and, inline, Open Food Facts)
@@ -140,19 +168,27 @@ struct LogMealSheet: View {
         let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespaces)
         return VStack(alignment: .leading, spacing: 8) {
             field("Food") {
-                TextField(openFoodFactsEnabled ? "Search your foods or online" : "Search your food library",
-                          text: $searchQuery)
-                    .textFieldStyle(.plain)
-                    .font(StrandFont.body)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .padding(.horizontal, 12).padding(.vertical, 9)
-                    .background(StrandPalette.surfaceInset, in: inputShape)
-                    .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
-                    .onChangeCompat(of: searchQuery) { newValue in
-                        Task { await search(newValue) }
-                        scheduleOffSearch(newValue)
-                    }
-                    .task { await search("") }
+                HStack(spacing: 8) {
+                    TextField(openFoodFactsEnabled ? "Search your foods or online" : "Search your food library",
+                              text: $searchQuery)
+                        .textFieldStyle(.plain)
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .padding(.horizontal, 12).padding(.vertical, 9)
+                        .background(StrandPalette.surfaceInset, in: inputShape)
+                        .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                        .onChangeCompat(of: searchQuery) { newValue in
+                            Task { await search(newValue) }
+                            scheduleOffSearch(newValue)
+                        }
+                        .task { await search("") }
+                    // Scanning resolves against Open Food Facts, so it's only offered when that's on —
+                    // same condition the online results below use. VisionKit's live scanner is iOS-only
+                    // (`BarcodeScannerScreen` is behind the same guard), so macOS never shows the button.
+                    #if os(iOS)
+                    if openFoodFactsEnabled { scanButton }
+                    #endif
+                }
             }
             if !searchResults.isEmpty {
                 resultsList(title: openFoodFactsEnabled && !offResults.isEmpty ? "Your foods" : nil) {
@@ -168,10 +204,25 @@ struct LogMealSheet: View {
             if openFoodFactsEnabled && !trimmedQuery.isEmpty {
                 onlineResultsSection
             }
-            NoopButton("New food", systemImage: "plus", kind: .secondary, fullWidth: true) {
-                showNewFoodSheet = true
-            }
         }
+    }
+
+    /// Barcode scan, sitting directly beside the search field: the fastest path to a packaged food is
+    /// its barcode, not typing its name. A hit is saved into the library and selected in one step, the
+    /// same as tapping an online search result.
+    private var scanButton: some View {
+        Button {
+            showScanner = true
+        } label: {
+            Image(systemName: "barcode.viewfinder")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(StrandPalette.accent)
+                .frame(width: 42, height: 40)
+                .background(StrandPalette.surfaceInset, in: inputShape)
+                .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scan a barcode")
     }
 
     @ViewBuilder
