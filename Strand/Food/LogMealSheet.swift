@@ -1,13 +1,17 @@
 import SwiftUI
 import StrandDesign
 import WhoopStore
+import PhotosUI
 
 // MARK: - Log meal sheet
 //
 // Search the food library for an item (or create a new one), enter a quantity and meal type, and
 // save one `MealEntryRow` for `day`. Mirrors `ManualWorkoutSheet`'s field()/footer idiom; the food
 // picker is a plain inline search list rather than the floating-overlay sport picker, to keep this
-// sheet's scope to what a meal log actually needs.
+// sheet's scope to what a meal log actually needs. Two scan paths sit beside the search field: a
+// barcode lookup against Open Food Facts, and an AI photo scan (`FoodPhotoScanClient`, bring-your-
+// own Anthropic key) that estimates a food from a camera shot — both resolve straight into a saved,
+// selected library item, the same outcome tapping a search result already produces.
 
 struct LogMealSheet: View {
     /// The entry being edited, or nil for a new log. When editing, `initialFood` is the food it
@@ -33,6 +37,16 @@ struct LogMealSheet: View {
     @State private var showNewFoodSheet = false
     @State private var showScanner = false
     @State private var scanNotFound = false
+
+    /// AI photo scan (Claude Haiku, bring-your-own-key — `FoodPhotoScanClient`): a camera shot or a
+    /// picked photo goes through the same "resolve → save to library → select" path `selectOnline`
+    /// already uses for an OFF result, just fed by an estimate instead of a lookup.
+    @State private var showPhotoScanSourcePicker = false
+    @State private var showPhotoScanCamera = false
+    @State private var showPhotoLibraryPicker = false
+    @State private var photoScanPickerItem: PhotosPickerItem?
+    @State private var photoScanning = false
+    @State private var photoScanError: FoodPhotoScanError?
 
     /// Online (Open Food Facts) results for the SAME query, shown inline below the library matches —
     /// no separate "add food" round trip needed to log something OFF already knows about.
@@ -150,6 +164,62 @@ struct LogMealSheet: View {
         } message: {
             Text("Open Food Facts has no product for that barcode.")
         }
+        .sheet(isPresented: $showPhotoScanCamera) {
+            #if os(iOS)
+            CameraCaptureScreen { data in
+                Task { await scanPhoto(data) }
+            }
+            #endif
+        }
+        .onChangeCompat(of: photoScanPickerItem) { newItem in
+            guard let newItem else { return }
+            Task {
+                let data = try? await newItem.loadTransferable(type: Data.self)
+                await MainActor.run { photoScanPickerItem = nil }
+                if let data { await scanPhoto(data) }
+            }
+        }
+        .alert("Couldn't scan photo", isPresented: Binding(
+            get: { photoScanError != nil }, set: { if !$0 { photoScanError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(photoScanError?.errorDescription ?? "")
+        }
+    }
+
+    /// Downscales the captured/picked photo (full-res phone photos are several MB — 1024px is plenty
+    /// for the model to identify a plate of food, and keeps the per-scan token cost small), sends it
+    /// to Claude, and on a hit saves the estimate into the library and selects it — the same outcome
+    /// `selectOnline`/`lookupBarcode` already produce, just fed by an AI estimate instead of a lookup.
+    private func scanPhoto(_ rawData: Data) async {
+        photoScanning = true
+        defer { photoScanning = false }
+        guard let jpeg = AvatarImage.downscaledJPEG(from: rawData, maxDimension: 1024, quality: 0.85) else {
+            photoScanError = .decode
+            return
+        }
+        do {
+            let scanned = try await FoodPhotoScanClient.scan(imageData: jpeg)
+            let item = FoodItemRow(
+                id: UUID().uuidString,
+                deviceId: WhoopStore.foodLogSourceId,
+                name: scanned.name,
+                kcalPer100g: scanned.kcalPer100g,
+                proteinPer100g: scanned.proteinPer100g,
+                carbsPer100g: scanned.carbsPer100g,
+                fatPer100g: scanned.fatPer100g,
+                barcode: nil,
+                createdAt: Int(Date().timeIntervalSince1970)
+            )
+            await repo.saveFoodItem(item)
+            selectedFood = item
+            quantityText = Self.trimmed(scanned.estimatedGrams)
+        } catch let e as FoodPhotoScanError {
+            photoScanError = e
+        } catch {
+            photoScanError = .network(error.localizedDescription)
+        }
     }
 
     /// Resolves a scanned barcode against Open Food Facts and, on a hit, saves it into the library and
@@ -187,6 +257,11 @@ struct LogMealSheet: View {
                     // (`BarcodeScannerScreen` is behind the same guard), so macOS never shows the button.
                     #if os(iOS)
                     if openFoodFactsEnabled { scanButton }
+                    if photoScanning {
+                        ProgressView().frame(width: 42, height: 40)
+                    } else {
+                        photoScanButton
+                    }
                     #endif
                 }
             }
@@ -223,6 +298,29 @@ struct LogMealSheet: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Scan a barcode")
+    }
+
+    /// AI photo scan, sitting beside the barcode button: point the camera at a plate (or pick an
+    /// existing photo) and Claude estimates what's on it. Offered regardless of the Open Food Facts
+    /// toggle — it's a separate, bring-your-own-key feature, not an OFF lookup.
+    private var photoScanButton: some View {
+        Button {
+            showPhotoScanSourcePicker = true
+        } label: {
+            Image(systemName: "camera.fill")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(StrandPalette.accent)
+                .frame(width: 42, height: 40)
+                .background(StrandPalette.surfaceInset, in: inputShape)
+                .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scan a food photo with AI")
+        .confirmationDialog("Scan food photo", isPresented: $showPhotoScanSourcePicker, titleVisibility: .visible) {
+            Button("Take Photo") { showPhotoScanCamera = true }
+            Button("Choose from Library") { showPhotoLibraryPicker = true }
+        }
+        .photosPicker(isPresented: $showPhotoLibraryPicker, selection: $photoScanPickerItem, matching: .images)
     }
 
     @ViewBuilder
