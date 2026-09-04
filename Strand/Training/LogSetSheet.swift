@@ -3,14 +3,14 @@ import StrandDesign
 
 // MARK: - Log-set confirmation sheet
 //
-// Shown right after a set ends (double-tap or manual Stop) to confirm reps/weight — the timer
-// already measured duration and rest, so this is a two-field form, not a full re-entry. Weight/reps
+// Shown right after a set ends (double-tap or manual Stop) to confirm reps/weight/effort — the
+// timer already measured duration and rest, so this is a short form, not a full re-entry. Weight/reps
 // default to the previous set of the same exercise, so the common "same weight, next set" case is
 // zero-typing (just tap Save). Mirrors `ManualWorkoutSheet`'s field()/footer idiom.
 
 struct LogSetSheet: View {
     let pending: ActiveTrainingController.PendingSet
-    let onConfirm: (_ reps: Int?, _ weightKg: Double?) -> Void
+    let onConfirm: (_ reps: Int?, _ weightKg: Double?, _ isWarmup: Bool, _ effortValue: Double?, _ effortScale: String?) -> Void
     let onCancel: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -20,12 +20,15 @@ struct LogSetSheet: View {
 
     @State private var repsText: String
     @State private var weightText: String
+    @State private var isWarmup = false
+    @AppStorage("trainingEffortScale") private var effortScaleRaw = "rir"
+    @State private var effortText = ""
 
-    private enum NumberField: Hashable { case reps, weight }
+    private enum NumberField: Hashable { case reps, weight, effort }
     @FocusState private var focusedField: NumberField?
 
     init(pending: ActiveTrainingController.PendingSet,
-         onConfirm: @escaping (_ reps: Int?, _ weightKg: Double?) -> Void,
+         onConfirm: @escaping (_ reps: Int?, _ weightKg: Double?, _ isWarmup: Bool, _ effortValue: Double?, _ effortScale: String?) -> Void,
          onCancel: @escaping () -> Void) {
         self.pending = pending
         self.onConfirm = onConfirm
@@ -54,7 +57,7 @@ struct LogSetSheet: View {
         formContent
             .padding(NoopMetrics.space6)
             .frame(maxWidth: .infinity)
-            .presentationDetents([.height(360)])
+            .presentationDetents([.height(480)])
             .presentationDragIndicator(.visible)
             .background(NoopChromeSurface())
             .keyboardDoneToolbar($focusedField)
@@ -78,6 +81,16 @@ struct LogSetSheet: View {
                     numberInput("optional", text: $weightText, unit: weightUnit, field: .weight)
                 }
             }
+            HStack(spacing: 14) {
+                field("Effort") {
+                    SegmentedPillControl(["rir", "rpe"], selection: $effortScaleRaw) { $0.uppercased() }
+                }
+                field("Value") {
+                    numberInput("optional", text: $effortText, unit: effortScaleRaw.uppercased(), field: .effort)
+                }
+            }
+            Toggle("Warm-up set", isOn: $isWarmup)
+                .tint(StrandPalette.accent)
             footer
         }
     }
@@ -145,8 +158,15 @@ struct LogSetSheet: View {
         return unitSystem == .imperial ? v / UnitFormatter.poundsPerKilogram : v
     }
 
+    private var effortValue: Double? {
+        let t = effortText.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, let v = Double(t), v >= 0 else { return nil }
+        return v
+    }
+    private var effortScale: String? { effortValue == nil ? nil : effortScaleRaw }
+
     private func save() {
-        onConfirm(reps, weightKg)
+        onConfirm(reps, weightKg, isWarmup, effortValue, effortScale)
         dismiss()
     }
 }

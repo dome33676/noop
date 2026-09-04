@@ -33,7 +33,7 @@ final class TemplateStoreTests: XCTestCase {
     }
 
     func testSchemaVersionIs21() {
-        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 22)
+        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 23)
     }
 
     // MARK: - v45 migration (additive: nullable rest-timer-target column on strengthTemplate)

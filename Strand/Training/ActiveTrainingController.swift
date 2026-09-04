@@ -16,6 +16,11 @@ final class ActiveTrainingController: ObservableObject {
     @Published private(set) var setStartedAt: Date?
     /// A just-ended set awaiting reps/weight confirmation — drives `LogSetSheet`. nil = sheet closed.
     @Published var pendingSet: PendingSet?
+    /// True right after `confirmPendingSet` logs a new PR — drives the PR banner on the active
+    /// exercise card. Reset the moment the next set starts (see `toggleSet()`).
+    @Published var lastLoggedWasPR = false
+    /// Per-exercise progression suggestion, recomputed from full history in `load()`.
+    @Published private(set) var progressionSuggestions: [String: ProgressionSuggestion] = [:]
 
     struct PendingSet: Identifiable {
         let id = UUID()
@@ -63,6 +68,10 @@ final class ActiveTrainingController: ObservableObject {
         for name in loggedNames where !merged.contains(name) { merged.append(name) }
         exerciseNames = merged
         if selectedExercise == nil { selectedExercise = exerciseNames.first }
+        for name in exerciseNames {
+            let history = await repo.strengthSets(exerciseName: name)
+            progressionSuggestions[name] = ProgressionCalculator.suggest(from: history)
+        }
     }
 
     func addExercise(_ name: String) {
@@ -105,7 +114,10 @@ final class ActiveTrainingController: ObservableObject {
     /// when there's no template (or the plan has no more slots for this exercise).
     func targetHint(for exerciseName: String) -> String? {
         guard let template,
-              let plan = template.plan.first(where: { $0.exerciseName == exerciseName }) else { return nil }
+              let plan = template.plan.first(where: { $0.exerciseName == exerciseName }) else {
+            guard let suggestion = progressionSuggestions[exerciseName] else { return nil }
+            return "Suggested: \(String(format: "%.1f", suggestion.suggestedWeightKg)) kg — \(suggestion.reasoning)"
+        }
         let nextIndex = sets(for: exerciseName).count
         guard plan.sets.indices.contains(nextIndex) else { return nil }
         let target = plan.sets[nextIndex]
@@ -150,7 +162,7 @@ final class ActiveTrainingController: ObservableObject {
                 setIndex: sets(for: exercise).count,
                 durationS: duration,
                 restBeforeS: restBefore,
-                defaultWeightKg: target?.targetWeightKg ?? lastSet?.weightKg,
+                defaultWeightKg: target?.targetWeightKg ?? progressionSuggestions[exercise]?.suggestedWeightKg ?? lastSet?.weightKg,
                 defaultReps: target?.targetReps ?? lastSet?.reps
             )
             lastAnySetEndedAt = now
@@ -159,6 +171,7 @@ final class ActiveTrainingController: ObservableObject {
             lastToggleAt = now
             setStartedAt = now
             restBuzzed = false
+            lastLoggedWasPR = false
             buzzSetStarted()
         }
         return true
@@ -183,14 +196,22 @@ final class ActiveTrainingController: ObservableObject {
     /// dismiss nils out the bound `pendingSet` on the same actor turn; re-reading `pendingSet` here
     /// races that nil-out and can see it already cleared, silently dropping the set (the bug behind
     /// "set 2 never gets logged, the plan stays stuck offering set 1 forever").
-    func confirmPendingSet(_ pending: PendingSet, reps: Int?, weightKg: Double?) async {
+    func confirmPendingSet(
+        _ pending: PendingSet, reps: Int?, weightKg: Double?, isWarmup: Bool, effortValue: Double?,
+        effortScale: String?
+    ) async {
         pendingSet = nil
         let row = StrengthSetRow(
             id: UUID().uuidString, deviceId: WhoopStore.strengthLogSourceId, sessionId: session.id,
             exerciseName: pending.exerciseName, setIndex: pending.setIndex, reps: reps,
             weightKg: weightKg, setDurationS: pending.durationS, restBeforeS: pending.restBeforeS,
+            isWarmup: isWarmup, effortValue: effortValue, effortScale: effortScale,
             completedAt: Int(Date().timeIntervalSince1970)
         )
+        // Cross-session history, fetched BEFORE this set is logged — `sets(for:)` is scoped to just
+        // THIS session, which would flag the first set of every exercise as a PR every single session.
+        let priorSets = await repo.strengthSets(exerciseName: pending.exerciseName)
+        lastLoggedWasPR = PRDetector.isPR(row, among: priorSets)
         await repo.logStrengthSet(row)
         await load()
         advanceIfComplete(pending.exerciseName)

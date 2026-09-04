@@ -983,6 +983,16 @@ extension WhoopStore {
                 t.add(column: "restTargetSeconds", .integer)
             }
         }
+        // v46: per-set warm-up flag and optional effort rating (RIR or RPE). Additive, all either
+        // NOT NULL DEFAULT 0 (isWarmup — every existing row is a real working set) or nullable (effort is
+        // opt-in; most historical sets have no rating).
+        migrator.registerMigration("v46-strength-set-effort-warmup") { db in
+            try db.alter(table: "strengthSet") { t in
+                t.add(column: "isWarmup", .integer).notNull().defaults(to: 0)
+                t.add(column: "effortValue", .double)
+                t.add(column: "effortScale", .text)
+            }
+        }
         return migrator
     }
 }

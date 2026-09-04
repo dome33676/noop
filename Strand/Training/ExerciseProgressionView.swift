@@ -43,6 +43,19 @@ struct ExerciseProgressionView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     }
                 }
+                if let suggestion = ProgressionCalculator.suggest(from: sets) {
+                    NoopCard {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("SUGGESTED NEXT").strandOverline()
+                            Text("\(String(format: "%.1f", suggestion.suggestedWeightKg)) kg")
+                                .font(StrandFont.title2)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Text(suggestion.reasoning)
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                        }
+                    }
+                }
                 if loaded && !sets.isEmpty {
                     NoopCard {
                         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
@@ -66,6 +79,18 @@ struct ExerciseProgressionView: View {
             Text(Self.dateFmt.string(from: Date(timeIntervalSince1970: TimeInterval(set.completedAt))))
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
+            if set.isWarmup {
+                Text("Warm-up")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            // Real full-history PR check — `sets` here IS the complete history for this exercise, so
+            // (unlike ActiveTrainingView's session-only trophy) this one is authoritative.
+            if PRDetector.isPR(set, among: sets.filter { $0.completedAt < set.completedAt }) {
+                Image(systemName: "trophy.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(StrandPalette.statusPositive)
+            }
             Spacer()
             if let reps = set.reps, let weight = set.weightKg {
                 Text("\(reps) × \(String(format: "%.1f", weight)) kg")
@@ -75,6 +100,11 @@ struct ExerciseProgressionView: View {
                 Text("\(String(format: "%.1f", weight)) kg")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textPrimary)
+            }
+            if let value = set.effortValue, let scale = set.effortScale {
+                Text("· \(scale.uppercased()) \(String(format: "%.1f", value))")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
             }
         }
         .padding(.vertical, 4)

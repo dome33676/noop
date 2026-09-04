@@ -46,7 +46,17 @@ final class StrengthStoreTests: XCTestCase {
     }
 
     func testSchemaVersionIs20() {
-        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 22)
+        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 23)
+    }
+
+    // MARK: - v46 migration (additive: per-set warm-up flag + optional effort rating on strengthSet)
+
+    func testV46AddsWarmupAndEffortColumns() async throws {
+        let store = try await WhoopStore.inMemory()
+        let cols = try await store.columnNamesForTest(table: "strengthSet")
+        for c in ["isWarmup", "effortValue", "effortScale"] {
+            XCTAssertTrue(cols.contains(c), "strengthSet missing v46 \(c) column")
+        }
     }
 
     // MARK: - helpers
@@ -152,5 +162,21 @@ final class StrengthStoreTests: XCTestCase {
 
         let sets = try await store.strengthSets(deviceId: WhoopStore.strengthLogSourceId, sessionId: "s1")
         XCTAssertEqual(sets.count, 0)
+    }
+
+    func testWarmupAndEffortRoundTripThroughLogAndRead() async throws {
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertStrengthSession(mkSession(id: "s1"))
+        try await store.logStrengthSet(StrengthSetRow(
+            id: "set1", deviceId: WhoopStore.strengthLogSourceId, sessionId: "s1",
+            exerciseName: "Bench Press", setIndex: 0, reps: 8, weightKg: 60, setDurationS: 12,
+            restBeforeS: 90, isWarmup: true, effortValue: 2.5, effortScale: "rir", completedAt: 100
+        ))
+
+        let sets = try await store.strengthSets(deviceId: WhoopStore.strengthLogSourceId, sessionId: "s1")
+        XCTAssertEqual(sets.count, 1)
+        XCTAssertEqual(sets[0].isWarmup, true)
+        XCTAssertEqual(sets[0].effortValue, 2.5)
+        XCTAssertEqual(sets[0].effortScale, "rir")
     }
 }

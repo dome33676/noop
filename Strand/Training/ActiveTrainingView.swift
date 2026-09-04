@@ -61,8 +61,12 @@ struct ActiveTrainingView: View {
             ExercisePickerSheet { name in controller.addExercise(name) }
         }
         .sheet(item: $controller.pendingSet) { pending in
-            LogSetSheet(pending: pending) { reps, weightKg in
-                Task { await controller.confirmPendingSet(pending, reps: reps, weightKg: weightKg) }
+            LogSetSheet(pending: pending) { reps, weightKg, isWarmup, effortValue, effortScale in
+                Task {
+                    await controller.confirmPendingSet(
+                        pending, reps: reps, weightKg: weightKg, isWarmup: isWarmup,
+                        effortValue: effortValue, effortScale: effortScale)
+                }
             } onCancel: {
                 controller.discardPendingSet()
             }
@@ -158,6 +162,11 @@ struct ActiveTrainingView: View {
                     }
                     .accessibilityLabel("View progression for \(exercise)")
                 }
+                if controller.lastLoggedWasPR {
+                    Label("New PR!", systemImage: "trophy.fill")
+                        .font(StrandFont.footnote.weight(.semibold))
+                        .foregroundStyle(StrandPalette.statusPositive)
+                }
                 if let hint = controller.targetHint(for: exercise) {
                     Text(hint)
                         .font(StrandFont.footnote.weight(.medium))
@@ -184,7 +193,7 @@ struct ActiveTrainingView: View {
                     Divider().opacity(0.4)
                     VStack(spacing: 0) {
                         ForEach(Array(logged.enumerated()), id: \.element.id) { idx, set in
-                            setRow(set, index: idx)
+                            setRow(set, index: idx, logged: logged)
                             if idx < logged.count - 1 { Divider().opacity(0.3) }
                         }
                     }
@@ -216,11 +225,25 @@ struct ActiveTrainingView: View {
         }
     }
 
-    private func setRow(_ set: StrengthSetRow, index: Int) -> some View {
+    /// `logged` is every set for this exercise already shown in THIS list (current session only, in
+    /// order) — the trophy icon here checks "best set so far in today's session", a lighter-weight
+    /// visual than the authoritative full-history PR check (`controller.lastLoggedWasPR`, set once
+    /// live when a set is confirmed).
+    private func setRow(_ set: StrengthSetRow, index: Int, logged: [StrengthSetRow]) -> some View {
         HStack {
             Text("Set \(index + 1)")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
+            if set.isWarmup {
+                Text("Warm-up")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            if PRDetector.isPR(set, among: Array(logged[..<index])) {
+                Image(systemName: "trophy.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(StrandPalette.statusPositive)
+            }
             Spacer()
             if let reps = set.reps, let weight = set.weightKg {
                 Text("\(reps) × \(String(format: "%.1f", weight)) kg")
@@ -230,6 +253,11 @@ struct ActiveTrainingView: View {
                 Text("\(reps) reps")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textPrimary)
+            }
+            if let value = set.effortValue, let scale = set.effortScale {
+                Text("· \(scale.uppercased()) \(String(format: "%.1f", value))")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
             }
             Button(role: .destructive) {
                 Task { await controller.deleteSet(set) }

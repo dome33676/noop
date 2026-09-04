@@ -53,11 +53,15 @@ public struct StrengthSetRow: Identifiable, Equatable, Codable, Sendable {
     public var weightKg: Double?
     public var setDurationS: Double?
     public var restBeforeS: Double?
+    public var isWarmup: Bool
+    public var effortValue: Double?     // the numeric rating; nil = not recorded
+    public var effortScale: String?     // "rir" or "rpe"; nil = not recorded
     public var completedAt: Int   // epoch seconds
 
     public init(
         id: String, deviceId: String, sessionId: String, exerciseName: String, setIndex: Int,
-        reps: Int?, weightKg: Double?, setDurationS: Double?, restBeforeS: Double?, completedAt: Int
+        reps: Int?, weightKg: Double?, setDurationS: Double?, restBeforeS: Double?,
+        isWarmup: Bool = false, effortValue: Double? = nil, effortScale: String? = nil, completedAt: Int
     ) {
         self.id = id
         self.deviceId = deviceId
@@ -68,6 +72,9 @@ public struct StrengthSetRow: Identifiable, Equatable, Codable, Sendable {
         self.weightKg = weightKg
         self.setDurationS = setDurationS
         self.restBeforeS = restBeforeS
+        self.isWarmup = isWarmup
+        self.effortValue = effortValue
+        self.effortScale = effortScale
         self.completedAt = completedAt
     }
 
@@ -76,7 +83,9 @@ public struct StrengthSetRow: Identifiable, Equatable, Codable, Sendable {
             id: row["id"], deviceId: row["deviceId"], sessionId: row["sessionId"],
             exerciseName: row["exerciseName"], setIndex: row["setIndex"], reps: row["reps"],
             weightKg: row["weightKg"], setDurationS: row["setDurationS"],
-            restBeforeS: row["restBeforeS"], completedAt: row["completedAt"]
+            restBeforeS: row["restBeforeS"], isWarmup: row["isWarmup"],
+            effortValue: row["effortValue"], effortScale: row["effortScale"],
+            completedAt: row["completedAt"]
         )
     }
 }
@@ -136,8 +145,8 @@ extension WhoopStore {
             try db.execute(sql: """
                 INSERT INTO strengthSet
                     (id, deviceId, sessionId, exerciseName, setIndex, reps, weightKg, setDurationS,
-                     restBeforeS, completedAt)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     restBeforeS, isWarmup, effortValue, effortScale, completedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     exerciseName = excluded.exerciseName,
                     setIndex = excluded.setIndex,
@@ -145,10 +154,14 @@ extension WhoopStore {
                     weightKg = excluded.weightKg,
                     setDurationS = excluded.setDurationS,
                     restBeforeS = excluded.restBeforeS,
+                    isWarmup = excluded.isWarmup,
+                    effortValue = excluded.effortValue,
+                    effortScale = excluded.effortScale,
                     completedAt = excluded.completedAt
                 """, arguments: [
                     set.id, set.deviceId, set.sessionId, set.exerciseName, set.setIndex, set.reps,
-                    set.weightKg, set.setDurationS, set.restBeforeS, set.completedAt,
+                    set.weightKg, set.setDurationS, set.restBeforeS, set.isWarmup, set.effortValue,
+                    set.effortScale, set.completedAt,
                 ])
             return db.changesCount > 0
         }
