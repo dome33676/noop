@@ -29,6 +29,7 @@ final class NavRouter: ObservableObject {
         case activeWorkout
         case liveSession
         case journal
+        case food
 
         var id: String { rawValue }
 
@@ -89,5 +90,17 @@ final class NavRouter: ObservableObject {
     func openJournal(day offset: Int? = nil) {
         pendingJournalDayOffset = offset
         requestedDestination = .journal
+    }
+
+    /// A meal type the Food widget's "+" deep-linked to, so the Food tab opens straight into the log
+    /// sheet for THAT meal instead of just landing on the tab. nil = open the tab with no sheet.
+    /// `FoodView` consumes it on appear/foreground and clears it back to nil.
+    @Published var pendingLogMealType: FoodMealType?
+
+    /// Open the Food tab; when `type` is given, also open the log sheet preset to that meal — the
+    /// Food widget's per-meal-type "+" button routes here via the `noop://log-meal` deep link.
+    func openLogMeal(type: FoodMealType? = nil) {
+        pendingLogMealType = type
+        requestedDestination = .food
     }
 }

@@ -260,9 +260,17 @@ struct StrandiOSApp: App {
                 // #581: the `noop://import-health` deep link the iOS Shortcut opens after building the
                 // HealthKit-free payload. Filter on the host so other future schemes don't trip the
                 // importer; macOS never registers the scheme so this stays iOS-only.
+                //
+                // `noop://log-meal[?type=breakfast|lunch|dinner|snack]` is the Food widget's per-meal
+                // "+" button — an unrecognised or missing `type` just opens the Food tab with no sheet
+                // rather than failing the whole deep link.
                 .onOpenURL { url in
                     if url.host == "import-health" {
                         model.handleHealthImportURL(url)
+                    } else if url.host == "log-meal" {
+                        let typeRaw = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                            .queryItems?.first(where: { $0.name == "type" })?.value
+                        router.openLogMeal(type: typeRaw.flatMap(FoodMealType.init(rawValue:)))
                     }
                 }
                 .alert("Import Apple Health data?", isPresented: healthImportAlertPresented) {
