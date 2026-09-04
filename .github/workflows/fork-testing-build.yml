@@ -293,6 +293,12 @@ jobs:
           # doesn't grow that branch without bound — each push fully replaces the previous one.
           rm -rf /tmp/altstore-source-branch && mkdir /tmp/altstore-source-branch
           cp altstore-source.json "$IPA" /tmp/altstore-source-branch/
+          # A second, STABLE-named copy of the same .ipa. The build-numbered name above is what the
+          # AltStore/SideStore source points at (those verify the exact build they were told about), but
+          # a manual iLoader/Sideloadly install just needs "the current one" — and with a name that
+          # changes every run, that means chasing down a fresh link for every single update. This one
+          # never changes, so it can be bookmarked once.
+          cp "$IPA" /tmp/altstore-source-branch/NOOP-latest.ipa
           git -C /tmp/altstore-source-branch init -q -b altstore-source
           git -C /tmp/altstore-source-branch config user.name "github-actions[bot]"
           git -C /tmp/altstore-source-branch config user.email "github-actions[bot]@users.noreply.github.com"
