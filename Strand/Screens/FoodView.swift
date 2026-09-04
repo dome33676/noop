@@ -67,12 +67,14 @@ struct FoodView: View {
             }
             .onAppear {
                 withAnimation(.easeOut(duration: 0.9)) { heroFraction = fraction }
-                // The Food widget's per-meal "+" deep-links here via NavRouter (noop://log-meal).
-                // Consumed once on arrival, then cleared, mirroring InsightsView's pendingJournalDayOffset.
-                if let type = router.pendingLogMealType {
-                    quickAddMealType = type
-                    router.pendingLogMealType = nil
-                }
+                consumePendingLogMealType()
+            }
+            // `.onAppear` alone only fires on a fresh mount (a cold app launch landing on this tab) —
+            // if NOOP is already running with Food already visible/backgrounded, tapping the widget's
+            // "+" again re-delivers the URL and updates `pendingLogMealType`, but this view never
+            // re-appears, so the sheet silently never opened. `onChangeCompat` catches that case too.
+            .onChangeCompat(of: router.pendingLogMealType) { _ in
+                consumePendingLogMealType()
             }
         }
         // Pinned above the tab bar, overlaid into the bottom scroll clearance `ScreenScaffold`
@@ -97,6 +99,16 @@ struct FoodView: View {
                 Task { await repo.logMeal(entry); await reload() }
             }
         }
+    }
+
+    /// The Food widget's per-meal "+" deep-links here via NavRouter (`noop://log-meal`). Consumed
+    /// once, then cleared, mirroring InsightsView's `pendingJournalDayOffset` — called from both
+    /// `.onAppear` (a cold launch landing on this tab) and an `onChange` of the value itself (NOOP
+    /// already running with Food visible/backgrounded, so this view never re-appears for a second tap).
+    private func consumePendingLogMealType() {
+        guard let type = router.pendingLogMealType else { return }
+        quickAddMealType = type
+        router.pendingLogMealType = nil
     }
 
     // MARK: - Floating "Log meal" (pinned above the tab bar)
