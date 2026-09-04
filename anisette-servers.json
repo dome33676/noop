@@ -1,0 +1,14 @@
+{
+  "servers": [
+    { "name": "StikStore", "address": "https://ani.stikstore.app" },
+    { "name": "SideStore (.io)", "address": "https://ani.sidestore.io" },
+    { "name": "SideStore (.app)", "address": "https://ani.sidestore.app" },
+    { "name": "SideStore (.zip)", "address": "https://ani.sidestore.zip" },
+    { "name": "SideStore (.xyz)", "address": "https://ani.846969.xyz" },
+    { "name": "nythepegasus", "address": "https://ani.npeg.us" },
+    { "name": "crystall1nedev", "address": "https://anisette.crystall1ne.dev" },
+    { "name": "WE. Studio", "address": "https://anisette.wedotstud.io" },
+    { "name": "Jayden's Server", "address": "https://ani.jaydenha.uk" },
+    { "name": "iDH Server", "address": "https://ani.idevicehacked.com" }
+  ]
+}
