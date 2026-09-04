@@ -108,6 +108,18 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
+      # DerivedData carried across runs so xcodebuild only recompiles what actually changed instead
+      # of a full clean build every time — this was the main reason a one-line change still took the
+      # same ~15-20 minutes as a large one. Keyed on project.yml/Package.resolved so a dependency or
+      # project-structure change gets a clean slate; restore-keys falls back to the most recent cache
+      # on any other miss rather than building from nothing.
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: build/dd
+          key: ${{ github.job }}-deriveddata-${{ hashFiles('project.yml', '**/Package.resolved') }}
+          restore-keys: |
+            ${{ github.job }}-deriveddata-
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
@@ -153,6 +165,14 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
+      # See the macOS job's identical step for why.
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: build/dd
+          key: ${{ github.job }}-deriveddata-${{ hashFiles('project.yml', '**/Package.resolved') }}
+          restore-keys: |
+            ${{ github.job }}-deriveddata-
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
