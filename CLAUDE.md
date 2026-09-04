@@ -5,6 +5,62 @@ Guidance for anyone (human or AI agent) submitting a pull request. This is the h
 rules, add-a-metric/screen/command recipes), [`docs/BUILD.md`](docs/BUILD.md) covers signing/pairing,
 and [`docs/IOS.md`](docs/IOS.md) covers the iOS target. Read this first; follow the links for depth.
 
+## This fork (dome33676/noop) — read this before anything else below
+
+Everything from here to "What NOOP is" is specific to **this fork**, on **this machine**, and
+overrides the upstream assumptions in the rest of this file (which was written for a contributor
+with a full local Xcode install). If you're an autonomous agent (Claude Code or otherwise) picking
+up work here without a human driving the session turn-by-turn, read this section fully before
+touching anything.
+
+- **There is no local Xcode on this machine** (blocked from upgrading past what's installed). Do
+  **not** attempt `xcodebuild`, `xcodegen generate` + a local build, or the iOS Simulator tools —
+  they will fail or silently do nothing useful. Xcode's Command Line Tools may be present, but that
+  is not enough for the app targets.
+- **The only way to verify an iOS/macOS/Android change actually builds is GitHub Actions**, via the
+  `Testing build (fork)` workflow (`.github/workflows/fork-testing-build.yml`, `workflow_dispatch`):
+  ```
+  gh workflow run fork-testing-build.yml --repo dome33676/noop
+  gh run list --repo dome33676/noop --workflow fork-testing-build.yml --limit 1   # get the run id
+  gh run watch <run-id> --repo dome33676/noop --exit-status
+  ```
+  Never report a change as "done" or "working" without a green run of this workflow. `swift build`/
+  `swift test` on the pure packages (`Packages/WhoopStore`, `StrandAnalytics`, …) *can* run locally
+  with just the Swift toolchain and are worth using for fast iteration on package-only changes — but
+  they do not touch the app targets (`Strand`, `NOOPiOS`, widgets), so they're a supplement to the CI
+  build, never a substitute for it before calling something finished.
+- **Sideload distribution**, once a CI run is green:
+  - Stable download link, always the latest build, never needs a fresh URL: `https://raw.githubusercontent.com/dome33676/noop/altstore-source/NOOP-latest.ipa`
+  - The reliable install path on this user's devices is **iLoader** (a desktop sideloading tool,
+    separate Apple-ID sign-in flow from AltServer/SideStore) — download the link above, connect the
+    iPhone by USB, iLoader → "Install IPA" → pick the file. AltStore Classic and SideStore were both
+    tried extensively and hit persistent Apple-ID/anisette-server sign-in failures unrelated to this
+    repo's code; don't spend time re-diagnosing that unless the user reports something new.
+  - The `.github/workflows/fork-testing-build.yml` `meta` job **edits the `testing-latest` release in
+    place** rather than deleting and recreating it — this was a deliberate fix (a delete+recreate
+    cycle briefly invalidates every asset URL, including the source JSON's own URL, which produced
+    intermittent "data couldn't be read" install failures). Don't reintroduce a delete+recreate
+    pattern there.
+  - The AltStore/SideStore JSON source and the `.ipa` are both published to a dedicated
+    `altstore-source` branch (force-pushed as a fresh orphan commit each run, not accumulated) and
+    served via `raw.githubusercontent.com`, **not** a `releases/download/...` URL — the latter goes
+    through a signed, redirect-based Azure Blob URL that measurably failed to fetch correctly
+    on-device. Don't move these back to release-asset URLs.
+  - In that same source JSON, `version` must equal the resigned app's real
+    `CFBundleShortVersionString` (`MARKETING_VERSION` in `project.yml`) **exactly**, and `buildVersion`
+    must equal its real `CFBundleVersion` exactly (the workflow sets `CURRENT_PROJECT_VERSION` to the
+    CI run number at build time specifically so this always matches) — AltStore Classic hard-fails
+    the install on any mismatch. Don't fake either value independently of what's actually embedded in
+    the built binary.
+- **Commit attribution**: commits made by Claude Code in this repo end with
+  `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>` (or the equivalent line for whichever
+  Claude model made the commit) — keep doing that if you're Claude.
+- **Autonomy**: this fork's `main` is pushed to directly (no PR-per-change process has been used so
+  far) and its CI build feeds a real device the user sideloads onto. If you're running unattended for
+  extended periods, prefer smaller, independently-buildable commits over one large batch, and always
+  end a work session on a state you've confirmed builds green — never leave `main` on a commit you
+  haven't verified via the workflow above.
+
 ## What NOOP is (and the hard scope limits)
 
 NOOP is an **offline-by-default, on-device** companion app for WHOOP 4.0 and 5.0/MG straps (with
