@@ -13,8 +13,9 @@ struct TrainingView: View {
 
     @State private var sessions: [StrengthSessionRow] = []
     @State private var loaded = false
-    @State private var startedSession: StrengthSessionRow?
-    @State private var startedTemplate: StrengthTemplateRow?
+    /// The session + template a just-started training should open with, set as ONE atomic value
+    /// (not two separate `@State` vars) — see `startTraining(from:)`.
+    @State private var startedTraining: StartedTraining?
     @State private var showStartPicker = false
     @State private var templates: [StrengthTemplateRow] = []
     @State private var showNewTemplate = false
@@ -106,12 +107,12 @@ struct TrainingView: View {
         // an in-progress session owns the whole display) rather than pushed — `.navigationDestination
         // (item:)` needs macOS 14, and this file compiles into the macOS 13 target too.
         #if os(iOS)
-        .fullScreenCover(item: $startedSession) { session in
-            ActiveTrainingView(session: session, repo: repo, model: model, template: startedTemplate)
+        .fullScreenCover(item: $startedTraining) { started in
+            ActiveTrainingView(session: started.session, repo: repo, model: model, template: started.template)
         }
         #else
-        .sheet(item: $startedSession) { session in
-            ActiveTrainingView(session: session, repo: repo, model: model, template: startedTemplate)
+        .sheet(item: $startedTraining) { started in
+            ActiveTrainingView(session: started.session, repo: repo, model: model, template: started.template)
         }
         #endif
     }
@@ -144,6 +145,17 @@ struct TrainingView: View {
         let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short; return f
     }()
 
+    /// Bundles a just-started session with the template it was started from — set as ONE `@State`
+    /// value in `startTraining(from:)` rather than two separate ones, so the session and its template
+    /// can never be observed out of sync with each other (the earlier two-`@State` version could
+    /// intermittently open a session whose exercises hadn't come from its template: "select a
+    /// template, sometimes its exercises don't make it into the training").
+    private struct StartedTraining: Identifiable {
+        let session: StrengthSessionRow
+        let template: StrengthTemplateRow?
+        var id: String { session.id }
+    }
+
     private func startTraining(from template: StrengthTemplateRow?) {
         let session = StrengthSessionRow(
             id: UUID().uuidString, deviceId: WhoopStore.strengthLogSourceId,
@@ -152,8 +164,7 @@ struct TrainingView: View {
         )
         Task {
             await repo.saveStrengthSession(session)
-            startedTemplate = template
-            startedSession = session
+            startedTraining = StartedTraining(session: session, template: template)
         }
     }
 
