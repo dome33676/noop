@@ -1,0 +1,40 @@
+{
+  "name": "NOOP (fork testing)",
+  "identifier": "com.noopapp.noop.altstore.staging",
+  "sourceURL": "https://raw.githubusercontent.com/dome33676/noop/altstore-source/altstore-source.json",
+  "subtitle": "Rolling testing builds — refreshed on every CI run.",
+  "description": "Rolling testing-build source for this fork of NOOP. Refreshed on every CI run so AltStore/SideStore always offers the newest build as an in-place update — no manual delete-and-reinstall.",
+  "iconURL": "https://github.com/dome33676/noop/raw/main/Strand/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512.png",
+  "website": "https://github.com/dome33676/noop",
+  "tintColor": "44E2B0",
+  "apps": [
+    {
+      "name": "NOOP",
+      "bundleIdentifier": "com.noopapp.noop",
+      "developerName": "NoopApp",
+      "subtitle": "Rolling testing build.",
+      "localizedDescription": "Testing build from https://github.com/dome33676/noop. Rebuilt on demand; the build number changes every run so AltStore/SideStore always sees this as an update, never a reinstall.",
+      "iconURL": "https://github.com/dome33676/noop/raw/main/Strand/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512.png",
+      "tintColor": "44E2B0",
+      "category": "healthcare-fitness",
+      "screenshotURLs": [],
+      "version": "10.6.1",
+      "versionDate": "2026-09-05",
+      "versionDescription": "Base app version 10.6.1 (build 35), built 2026-09-05 (ac276d3).",
+      "downloadURL": "https://raw.githubusercontent.com/dome33676/noop/altstore-source/NOOP-ios-unsigned-v10.6.1-b35.ipa",
+      "size": 20122214,
+      "minOSVersion": "17.0",
+      "versions": [
+        {
+          "version": "10.6.1",
+          "buildVersion": "35",
+          "date": "2026-09-05",
+          "localizedDescription": "Base app version 10.6.1, built 2026-09-05 (ac276d3).",
+          "downloadURL": "https://raw.githubusercontent.com/dome33676/noop/altstore-source/NOOP-ios-unsigned-v10.6.1-b35.ipa",
+          "size": 20122214,
+          "minOSVersion": "17.0"
+        }
+      ]
+    }
+  ]
+}
