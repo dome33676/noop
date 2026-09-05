@@ -120,6 +120,13 @@ jobs:
           key: ${{ github.job }}-deriveddata-${{ hashFiles('project.yml', '**/Package.resolved') }}
           restore-keys: |
             ${{ github.job }}-deriveddata-
+      # A runner-image update can touch SDK header/modulemap mtimes without any Xcode version bump,
+      # which invalidates cached .pcm files against a restored-but-now-stale ModuleCache.noindex and
+      # hard-fails the build ("file ... has been modified since the module file was built: mtime
+      # changed"). Rebuilding the module cache is cheap next to a full DerivedData rebuild, so clearing
+      # it unconditionally trades a small amount of that caching's benefit for never hitting this again.
+      - name: Clear stale module cache
+        run: rm -rf build/dd/ModuleCache.noindex
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
@@ -173,6 +180,9 @@ jobs:
           key: ${{ github.job }}-deriveddata-${{ hashFiles('project.yml', '**/Package.resolved') }}
           restore-keys: |
             ${{ github.job }}-deriveddata-
+      # See the macOS job's identical step for why.
+      - name: Clear stale module cache
+        run: rm -rf build/dd/ModuleCache.noindex
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
