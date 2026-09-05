@@ -2636,6 +2636,16 @@ struct SettingsView: View {
     /// the hand-maintained changelog version only if the Info.plist key is somehow missing.
     private var bundleVersionString: String { UpdateWatch.installedVersion }
 
+    #if os(iOS)
+    /// "never" for a snapshot that's never been written, else how long ago it was — for the Widget
+    /// diagnostics block below.
+    private static func diagTimestamp(_ date: Date?) -> String {
+        guard let date else { return "never" }
+        let f = RelativeDateTimeFormatter(); f.unitsStyle = .short
+        return f.localizedString(for: date, relativeTo: Date())
+    }
+    #endif
+
     private var aboutCard: some View {
         SettingsSection(
             icon: "info.circle.fill",
@@ -2653,6 +2663,25 @@ struct SettingsView: View {
                         showWhatsNew = true
                     }
                 }
+
+                #if os(iOS)
+                // Widget diagnostics: a sideloaded build's re-signing pass can silently fail to grant
+                // the App Group entitlement to one or both targets, which looks IDENTICAL from the
+                // outside to "the app just hasn't published yet" (both render the widget's all-zero
+                // placeholder forever) — the app itself has no other way to show whether it's actually
+                // writing into a container the widget extension can read, so this surfaces it directly:
+                // the resolved suite name, whether this process can open it at all, and when each
+                // snapshot type last actually wrote. "MISSING"/"never" here, even right after opening
+                // the app, points at signing/provisioning — not at anything fixable in this app's code.
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("WIDGET DIAGNOSTICS").strandOverline()
+                    Text("App Group: \(WidgetSnapshot.suiteName) — \(UserDefaults(suiteName: WidgetSnapshot.suiteName) != nil ? "reachable" : "MISSING")")
+                    Text("Recovery snapshot: \(Self.diagTimestamp(WidgetSnapshot.load()?.updated))")
+                    Text("Food snapshot: \(Self.diagTimestamp(FoodWidgetSnapshot.load()?.updated))")
+                }
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+                #endif
 
                 // How NOOP works — the plain-English primer: how sleep is sorted, how scores +
                 // calibration work, what recording means, and where the provenance badges come
