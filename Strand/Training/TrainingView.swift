@@ -20,6 +20,7 @@ struct TrainingView: View {
     @State private var templates: [StrengthTemplateRow] = []
     @State private var showNewTemplate = false
     @State private var editingTemplate: StrengthTemplateRow?
+    @State private var showBackfill = false
 
     var body: some View {
         ScreenScaffold(title: "Training", subtitle: "Your strength sessions, on this device only.",
@@ -60,7 +61,18 @@ struct TrainingView: View {
                         }
                     }
                 }
-                Text("Vergangene Trainings").strandOverline()
+                HStack {
+                    Text("Vergangene Trainings").strandOverline()
+                    Spacer()
+                    Button { showBackfill = true } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(StrandPalette.accent)
+                            .frame(width: 30, height: 30)
+                            .background(StrandPalette.surfaceInset, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
                 if loaded && sessions.isEmpty {
                     NoopCard {
                         Text("No trainings logged yet.")
@@ -102,6 +114,9 @@ struct TrainingView: View {
             TemplateEditorView(editing: template) { updated in
                 Task { await repo.saveTemplate(updated); await reloadTemplates() }
             }
+        }
+        .sheet(isPresented: $showBackfill) {
+            BackfillTrainingSheet(onSaved: { Task { await reload() } })
         }
         // A just-started session is presented full-screen (matching the Live-session convention:
         // an in-progress session owns the whole display) rather than pushed — `.navigationDestination

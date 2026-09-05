@@ -16,11 +16,21 @@ struct RootTabView: View {
     @EnvironmentObject private var router: NavRouter
     /// The scene-local receiver for actions chosen from NOOP's Home Screen icon menu.
     @EnvironmentObject private var homeScreenQuickActions: HomeScreenQuickActionSceneDelegate
+    /// Drives the morning journal-nudge re-check on a background→foreground re-open, not just cold
+    /// launch (mirrors Android's `LaunchedEffect(sleeps)` re-firing on every Sleep-screen recomposition).
+    @Environment(\.scenePhase) private var scenePhase
 
     /// Which quick-action screen the centre FAB is presenting (nil = sheet closed).
     @State private var quickAction: QuickAction?
     /// Presents the Devices manager (pair / switch bands) when a screen asks the shell to open it.
     @State private var showDevices = false
+    /// The morning journal wake-prompt sheet (iOS port of Android's SleepScreen.kt morning-journal
+    /// nudge, PR #260). See `checkJournalWakePrompt()`.
+    @State private var showJournalWakePrompt = false
+    /// Calendar-day key of the last day this prompt was shown, so it fires at most once per day even
+    /// across a cold-launch AND the scenePhase `.active` callback landing close together. New key
+    /// (mirrors the existing "foodGoalKcal"-style local, dotted namespacing for shell-local state).
+    @AppStorage("journal.lastPromptDay") private var lastJournalPromptDay = ""
     /// A routed v5 pillar screen (Insights hub / Lab Book / fused record / Rhythm) presented as a sheet
     /// when a hub row deep-links to it via NavRouter. nil = closed.
     @State private var routedPillar: NavRouter.Destination?
@@ -160,6 +170,16 @@ struct RootTabView: View {
         .sheet(item: $routedPillar) { dest in
             pillarScreen(dest)
         }
+        // Morning journal wake prompt (iOS port of Android SleepScreen.kt's morning-journal nudge, PR
+        // #260) — hooked here rather than any single tab, so it fires on ANY app open, not just a visit
+        // to Sleep. "Open Journal" sets `quickAction` directly (same @State this file already owns),
+        // reaching the exact same `.journal` → InsightsView path as JournalReminderCard's tap.
+        .sheet(isPresented: $showJournalWakePrompt) {
+            JournalWakePrompt(onOpenJournal: {
+                showJournalWakePrompt = false
+                withAnimation(Self.sheetEase) { quickAction = .journal }
+            })
+        }
         // Honour a router request: Devices keeps its dedicated sheet; the v5 pillars route through the
         // shared pillar sheet. Cleared so the same tap can fire again later.
         .onChange(of: router.requestedDestination) { _, dest in
@@ -210,12 +230,52 @@ struct RootTabView: View {
         // through the change callback. Both route through the same screens as the centre FAB.
         .onAppear {
             presentPendingHomeScreenQuickActionIfPossible()
+            checkJournalWakePrompt()
         }
         .onChange(of: homeScreenQuickActions.pendingAction) { _, _ in
             presentPendingHomeScreenQuickActionIfPossible()
         }
         .onChange(of: homeScreenQuickActionsEnabled) { _, _ in
             presentPendingHomeScreenQuickActionIfPossible()
+        }
+        // Cold launch is covered by the `.onAppear` above; a background→foreground re-open only
+        // re-runs `.onAppear` if the view was torn down, so a resume needs its own trigger too.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { checkJournalWakePrompt() }
+        }
+    }
+
+    /// Morning journal wake prompt (#260 iOS twin): once per calendar day, when the freshest sleep
+    /// session ended within the last 12 hours and today's journal isn't logged yet, offer to open it.
+    /// Fire-and-forget from a sync context (`.onAppear`/`.onChange` can't be async), matching the
+    /// `presentPendingHomeScreenQuickActionIfPossible()` call sites above.
+    private func checkJournalWakePrompt() {
+        guard PuffinExperiment.journalReminderEnabled else { return }
+        Task {
+            let now = Int(Date().timeIntervalSince1970)
+            // Last ~2 days is enough to cover the 12h window with margin; matches the existing
+            // JournalReminderCard's window sizing philosophy (recent-window reads, not full history).
+            let sessions = await repo.sleepSessions(from: now - 2 * 86_400, to: now + 3_600)
+            // Unlike Android's `sleeps.lastOrNull()`, repo.sleepSessions(from:to:) is NOT guaranteed
+            // globally sorted when multiple device ids are unioned (Repository.swift's unionSleepSessions
+            // concatenates per-id ASC-sorted lists without a final sort) — so take the max endTs
+            // explicitly rather than `.last`, to always mean "the freshest night" regardless of union order.
+            guard let latestEnd = sessions.map(\.endTs).max() else { return }
+            let hoursAgo = Double(now - latestEnd) / 3600.0
+            guard (0.0...12.0).contains(hoursAgo) else { return }
+
+            let today = Repository.localDayKey(Date())
+            let loggedToday = await repo.nativeJournalDays(from: today, to: today).contains(today)
+            guard !loggedToday else { return }
+
+            guard lastJournalPromptDay != today else { return }
+            // Persist BEFORE presenting (matches Android's write-then-show ordering) to close the
+            // double-trigger race between `.onAppear` and the scenePhase `.active` callback firing
+            // close together.
+            await MainActor.run {
+                lastJournalPromptDay = today
+                withAnimation(Self.sheetEase) { showJournalWakePrompt = true }
+            }
         }
     }
 

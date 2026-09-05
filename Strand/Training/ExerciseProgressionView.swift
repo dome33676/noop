@@ -17,15 +17,16 @@ struct ExerciseProgressionView: View {
 
     private var points: [TrendPoint] {
         sets.compactMap { set in
-            guard let weight = set.weightKg else { return nil }
-            return TrendPoint(date: Date(timeIntervalSince1970: TimeInterval(set.completedAt)), value: weight)
+            guard !set.isWarmup, let weight = set.weightKg else { return nil }
+            let volume = set.reps.map { weight * Double($0) } ?? weight
+            return TrendPoint(date: Date(timeIntervalSince1970: TimeInterval(set.completedAt)), value: volume)
         }
     }
 
     var body: some View {
-        ScreenScaffold(title: LocalizedStringKey(exerciseName), subtitle: "Weight over time", onRefresh: { await reload() }) {
+        ScreenScaffold(title: LocalizedStringKey(exerciseName), subtitle: "Volume over time", onRefresh: { await reload() }) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                ChartCard(title: "WEIGHT", subtitle: "kg, across all trainings", tint: StrandPalette.effortColor) {
+                ChartCard(title: "VOLUME", subtitle: "kg moved, across all trainings", tint: StrandPalette.effortColor) {
                     if points.count >= 2 {
                         let values = points.map(\.value)
                         let lo = (values.min() ?? 0) - 2, hi = (values.max() ?? 1) + 2
@@ -37,7 +38,7 @@ struct ExerciseProgressionView: View {
                             valueFormat: { String(format: "%.1f kg", $0) }
                         )
                     } else {
-                        Text("Not enough data yet — log at least two sets with a weight.")
+                        Text("Not enough data yet — log at least two working sets with a weight.")
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)

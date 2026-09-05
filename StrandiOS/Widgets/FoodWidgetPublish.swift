@@ -19,7 +19,7 @@ enum FoodWidgetPublish {
         )
         guard FoodWidgetSnapshot.renderedContentChanged(from: FoodWidgetSnapshot.load(), to: next) else { return }
         next.save()
-        WidgetCenter.shared.reloadTimelines(ofKind: "NOOPFoodWidget")
+        WidgetCenter.shared.reloadAllTimelines()
     }
 }
 #endif
