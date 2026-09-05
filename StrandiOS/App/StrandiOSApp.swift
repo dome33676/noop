@@ -328,6 +328,11 @@ struct StrandiOSApp: App {
                         }
                     )
                     await WidgetSnapshot.publish(from: model)
+                    // Tab-independent, like the line above: FoodView.reload() only publishes while the
+                    // Food tab is actually visited, so a widget added fresh (or a reinstall's new App
+                    // Group container) otherwise sat on its all-zero placeholder until the user happened
+                    // to open Food at least once.
+                    await FoodWidgetPublish.publishToday(repo: model.repo)
                     // Push the wrist on the SAME refresh as the Home-screen widget so the watch, the
                     // widget and Today never disagree about which day they describe. Without this the
                     // watch only ever holds placeholder data on a real device.
@@ -348,6 +353,7 @@ struct StrandiOSApp: App {
                 // the user just saw — its battery/HR/score otherwise lag to the last FOREGROUND refreshSeq
                 // bump. One reload per app-exit is low-frequency and well within WidgetKit's daily budget.
                 Task { await WidgetSnapshot.publish(from: model) }
+                Task { await FoodWidgetPublish.publishToday(repo: model.repo) }
                 // #155: refresh the Documents/noop_sync.txt drop file the user's Siri Shortcut logs
                 // into Apple Health. Gated inside writeIfEnabled on the opt-in default (OFF) — a
                 // no-op until the user turns on Shortcuts Export.
