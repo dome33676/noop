@@ -242,7 +242,7 @@ struct FoodView: View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 HStack {
-                    Text("DEAL FINDER").strandOverline()
+                    Text("MONSTER FINDER").strandOverline()
                     Spacer()
                     Button {
                         guard let url = DealFinderLink.searchURL(for: dealFinderProduct) else { return }

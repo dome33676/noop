@@ -1664,7 +1664,7 @@ struct SettingsView: View {
                 rowDivider
 
                 Toggle(isOn: $dealFinderEnabled) {
-                    Text("Deal Finder")
+                    Text("Monster Finder")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
