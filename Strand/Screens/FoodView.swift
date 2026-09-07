@@ -34,6 +34,7 @@ struct FoodView: View {
 
     @AppStorage(DealFinderLink.enabledKey) private var dealFinderEnabled = false
     @AppStorage(DealFinderLink.productKey) private var dealFinderProduct = "Monster Energy"
+    @StateObject private var dealFinder = DealFinderStore()
 
     @State private var heroFraction: Double = 0
     /// (BMR + active kcal) for each of the last few PAST days that had Apple Health active-kcal data
@@ -234,24 +235,61 @@ struct FoodView: View {
 
     // MARK: - Deal Finder (opt-in, Settings > Features)
 
-    /// A plain link-out to marktguru.de's own public search for the tracked product — see
-    /// DealFinderLink's header for why this never fetches their data into NOOP itself.
+    /// The cheapest current offer for the tracked product, scraped from marktguru.de — see
+    /// DealFinderStore's header for how and why (the developer explicitly accepted the ToS
+    /// tradeoff for this personal, low-volume use).
     private var dealFinderCard: some View {
         NoopCard {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                HStack {
                     Text("DEAL FINDER").strandOverline()
-                    Text(dealFinderProduct)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textPrimary)
+                    Spacer()
+                    Button {
+                        guard let url = DealFinderLink.searchURL(for: dealFinderProduct) else { return }
+                        PlatformOpen.url(url)
+                    } label: {
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open on marktguru.de")
                 }
-                Spacer()
-                NoopButton("Angebote", systemImage: "arrow.up.right", kind: .secondary) {
-                    guard let url = DealFinderLink.searchURL(for: dealFinderProduct) else { return }
-                    PlatformOpen.url(url)
+                if dealFinder.isLoading && dealFinder.offers.isEmpty {
+                    Text("Suche Angebote für \(dealFinderProduct)…")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                } else if let cheapest = dealFinder.offers.first {
+                    let others = dealFinder.offers.count - 1
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(cheapest.price.map { String(format: "%.2f € bei %@", $0, cheapest.store) } ?? cheapest.store)
+                                .font(StrandFont.title2)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            if let validity = cheapest.validityLabel {
+                                Text(others > 0 ? "\(validity) · +\(others) weitere" : validity)
+                                    .font(StrandFont.footnote)
+                                    .foregroundStyle(StrandPalette.textTertiary)
+                            } else if others > 0 {
+                                Text("+\(others) weitere")
+                                    .font(StrandFont.footnote)
+                                    .foregroundStyle(StrandPalette.textTertiary)
+                            }
+                        }
+                        Spacer()
+                    }
+                } else if let error = dealFinder.lastError {
+                    Text(error)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                } else {
+                    Text("Keine aktuellen Angebote für \(dealFinderProduct) gefunden.")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textTertiary)
                 }
             }
         }
+        .task(id: dealFinderProduct) { await dealFinder.refreshIfStale(product: dealFinderProduct) }
     }
 
     private func mealTypeRow(_ type: FoodMealType) -> some View {
