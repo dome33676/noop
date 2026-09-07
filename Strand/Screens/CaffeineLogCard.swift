@@ -313,7 +313,8 @@ struct CaffeineLogCard: View {
 
     private func logPill(_ label: LocalizedStringKey, hoursAgo: Int) -> some View {
         pillButton(label, selected: false) {
-            let mg = Double(mgDraft.trimmingCharacters(in: .whitespaces))   // nil if blank/invalid
+            // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+            let mg = Double(mgDraft.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: "."))   // nil if blank/invalid
             let at = Calendar.current.date(byAdding: .hour, value: -hoursAgo, to: tick) ?? tick
             store.log(at: at, mg: mg)
             mgDraft = ""

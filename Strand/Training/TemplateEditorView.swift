@@ -125,7 +125,8 @@ struct TemplateEditorView: View {
         HStack(spacing: 4) {
             TextField("—", text: Binding(
                 get: { value.wrappedValue.map { String($0) } ?? "" },
-                set: { value.wrappedValue = $0.isEmpty ? nil : Value($0.trimmingCharacters(in: .whitespaces)) }
+                // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+                set: { value.wrappedValue = $0.isEmpty ? nil : Value($0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")) }
             ))
             .textFieldStyle(.plain)
             .font(StrandFont.bodyNumber)

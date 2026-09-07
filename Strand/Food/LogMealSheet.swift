@@ -517,7 +517,8 @@ struct LogMealSheet: View {
     private var inputShape: RoundedRectangle { RoundedRectangle(cornerRadius: 10, style: .continuous) }
 
     private var quantityGrams: Double? {
-        let t = quantityText.trimmingCharacters(in: .whitespaces)
+        // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+        let t = quantityText.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
         guard let v = Double(t), v > 0 else { return nil }
         return v
     }

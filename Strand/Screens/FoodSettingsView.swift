@@ -98,7 +98,8 @@ struct FoodSettingsView: View {
     private func textBinding(for value: Binding<Double>) -> Binding<String> {
         Binding(
             get: { String(Int(value.wrappedValue)) },
-            set: { newText in if let parsed = Double(newText) { value.wrappedValue = parsed } }
+            // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+            set: { newText in if let parsed = Double(newText.replacingOccurrences(of: ",", with: ".")) { value.wrappedValue = parsed } }
         )
     }
 

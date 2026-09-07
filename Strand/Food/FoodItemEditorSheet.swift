@@ -279,7 +279,8 @@ struct FoodItemEditorSheet: View {
     private var inputShape: RoundedRectangle { RoundedRectangle(cornerRadius: 10, style: .continuous) }
 
     private func parsed(_ text: String) -> Double?? {
-        let t = text.trimmingCharacters(in: .whitespaces)
+        // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+        let t = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
         if t.isEmpty { return .some(nil) }
         guard let v = Double(t), v >= 0 else { return nil }
         return .some(v)

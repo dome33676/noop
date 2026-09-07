@@ -21,7 +21,12 @@ enum FoodWidgetPublish {
         )
         guard FoodWidgetSnapshot.renderedContentChanged(from: FoodWidgetSnapshot.load(), to: next) else { return }
         next.save()
-        WidgetCenter.shared.reloadAllTimelines()
+        // Scoped to this widget kind only: publishToday(repo:) below already covers the
+        // tab-independent (foreground/background) trigger that reloadAllTimelines() was
+        // originally widened to guess-fix, so there's no remaining reason to also force-reload
+        // the unrelated recovery widget here — that just spends shared per-app reload budget
+        // on a no-op for it.
+        WidgetCenter.shared.reloadTimelines(ofKind: "NOOPFoodWidget")
     }
 
     /// Same publish, but computed directly from `repo` instead of a view's already-loaded state — for

@@ -183,13 +183,15 @@ struct BackfillTrainingSheet: View {
 
     /// Parsed weight in stored KILOGRAMS — verbatim LogSetSheet's conversion.
     private func weightKg(_ text: String) -> Double? {
-        let t = text.trimmingCharacters(in: .whitespaces)
+        // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+        let t = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
         guard !t.isEmpty, let v = Double(t), v >= 0 else { return nil }
         return unitSystem == .imperial ? v / UnitFormatter.poundsPerKilogram : v
     }
 
     private func effort(_ text: String) -> Double? {
-        let t = text.trimmingCharacters(in: .whitespaces)
+        // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+        let t = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
         guard !t.isEmpty, let v = Double(t), v >= 0 else { return nil }
         return v
     }

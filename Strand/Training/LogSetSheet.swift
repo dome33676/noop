@@ -153,13 +153,15 @@ struct LogSetSheet: View {
 
     /// Parsed weight in stored KILOGRAMS — the user enters in their unit system.
     private var weightKg: Double? {
-        let t = weightText.trimmingCharacters(in: .whitespaces)
+        // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+        let t = weightText.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
         guard !t.isEmpty, let v = Double(t), v >= 0 else { return nil }
         return unitSystem == .imperial ? v / UnitFormatter.poundsPerKilogram : v
     }
 
     private var effortValue: Double? {
-        let t = effortText.trimmingCharacters(in: .whitespaces)
+        // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+        let t = effortText.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
         guard !t.isEmpty, let v = Double(t), v >= 0 else { return nil }
         return v
     }

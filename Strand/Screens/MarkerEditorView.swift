@@ -443,7 +443,8 @@ struct MarkerEditorView: View {
     }
 
     private func parsed(_ s: String) -> Double? {
-        Double(s.trimmingCharacters(in: .whitespaces))
+        // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+        Double(s.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: "."))
     }
 
     private func save() {

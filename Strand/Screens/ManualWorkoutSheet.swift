@@ -376,12 +376,13 @@ struct ManualWorkoutSheet: View {
 
     /// Parsed avg-HR — nil for blank, an out-of-band sentinel handled by buildManualRow otherwise.
     private var avgHr: Int? { Int(avgHrText.trimmingCharacters(in: .whitespaces)) }
-    private var kcal: Double? { Double(kcalText.trimmingCharacters(in: .whitespaces)) }
+    private var kcal: Double? { Double(kcalText.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")) }
 
     /// Parsed distance in stored METRES — nil for blank (no distance), or when the typed value can't be a
     /// non-negative number. The user enters km/mi; convert to metres for the row. (#1195)
     private var distanceMeters: Double? {
-        let t = distanceText.trimmingCharacters(in: .whitespaces)
+        // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
+        let t = distanceText.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
         guard !t.isEmpty, let v = Double(t), v >= 0 else { return nil }
         let km = unitSystem == .imperial ? v / UnitFormatter.milesPerKilometer : v
         return km * 1000.0

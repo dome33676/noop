@@ -243,6 +243,16 @@ struct RootTabView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { checkJournalWakePrompt() }
         }
+        // Race fix: this scenePhase callback and StrandiOSApp's own (which drives the actual Apple
+        // Health import via health.sync() -> refreshAfterAppleHealthSync) are two independent,
+        // unawaited Tasks reacting to the SAME .active transition with no ordering between them. The
+        // import is ~15 sequential HealthKit queries; this check's two DB reads are fast, so on a cold
+        // morning open the check above routinely runs BEFORE last night's session lands in the store,
+        // fails the 0-12h guard, and — with nothing to re-trigger it — never fires. Re-running on every
+        // refreshSeq bump (same idiom as StrandiOSApp.swift's widget republish + JournalReminderCard's
+        // `.task(id:)`) catches the moment the import actually completes. Safe to re-invoke freely: the
+        // check is already idempotent per calendar day via the `lastJournalPromptDay` guard above.
+        .onReceive(repo.$refreshSeq.dropFirst()) { _ in checkJournalWakePrompt() }
     }
 
     /// Morning journal wake prompt (#260 iOS twin): once per calendar day, when the freshest sleep
