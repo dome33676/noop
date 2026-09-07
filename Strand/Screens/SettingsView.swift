@@ -218,6 +218,14 @@ struct SettingsView: View {
     /// (last-7-days strip + tap-through). Mirrors the Android `NoopPrefs.KEY_JOURNAL_REMINDER_ENABLED`.
     @AppStorage(PuffinExperiment.journalReminderKey) private var journalReminderEnabled = true
 
+    /// "Deal Finder" (default OFF). A quick-launch link to marktguru.de's own public search for a
+    /// tracked product — deliberately NOT an in-app scraper: marktguru's AGB explicitly prohibits
+    /// automated/programmatic data extraction, so this just opens their public search page in the
+    /// browser (the same "private consumption" a human visitor is permitted) rather than fetching
+    /// their data into NOOP itself. When ON, the Food tab shows a card linking straight to it.
+    @AppStorage(DealFinderLink.enabledKey) private var dealFinderEnabled = false
+    @AppStorage(DealFinderLink.productKey) private var dealFinderProduct = "Monster Energy"
+
     /// Opt-in "Keep screen on during a workout" (default OFF, #703). When ON, the live-workout view
     /// holds the screen awake while a manual recording is running so you can glance at your live HR
     /// without the device dimming. The live-workout view reads this same key. The string is shared
@@ -1652,6 +1660,31 @@ struct SettingsView: View {
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                rowDivider
+
+                Toggle(isOn: $dealFinderEnabled) {
+                    Text("Deal Finder")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                .toggleStyle(.switch)
+                .tint(StrandPalette.accent)
+                .accessibilityHint("Adds a Food tab card linking to current supermarket deals for a tracked product")
+
+                Text("Adds a card on Food linking straight to marktguru.de's public deal search for a product you name below — it opens their site in the browser rather than fetching anything into NOOP, so there's nothing to keep in sync.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if dealFinderEnabled {
+                    TextField("Product, e.g. Monster Energy", text: $dealFinderProduct)
+                        .textFieldStyle(.plain)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .padding(.horizontal, 12).padding(.vertical, 9)
+                        .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
             }
         }
     }

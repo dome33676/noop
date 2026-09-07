@@ -32,6 +32,9 @@ struct FoodView: View {
     @AppStorage("foodGoalCarbsG") private var goalCarbs = 250.0
     @AppStorage("foodGoalFatG") private var goalFat = 70.0
 
+    @AppStorage(DealFinderLink.enabledKey) private var dealFinderEnabled = false
+    @AppStorage(DealFinderLink.productKey) private var dealFinderProduct = "Monster Energy"
+
     @State private var heroFraction: Double = 0
     /// (BMR + active kcal) for each of the last few PAST days that had Apple Health active-kcal data
     /// — the measured-TDEE input for `CalorieTarget`. Empty until enough days accumulate.
@@ -61,6 +64,7 @@ struct FoodView: View {
                 heroSection
                 if dayOffset == 0 { energyBalanceSection }
                 mealsSection
+                if dealFinderEnabled { dealFinderCard }
             }
             .onChangeCompat(of: fraction) { newFraction in
                 withAnimation(.easeOut(duration: 0.9)) { heroFraction = newFraction }
@@ -224,6 +228,28 @@ struct FoodView: View {
                 Text("No meals logged for this day yet.")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
+            }
+        }
+    }
+
+    // MARK: - Deal Finder (opt-in, Settings > Features)
+
+    /// A plain link-out to marktguru.de's own public search for the tracked product — see
+    /// DealFinderLink's header for why this never fetches their data into NOOP itself.
+    private var dealFinderCard: some View {
+        NoopCard {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("DEAL FINDER").strandOverline()
+                    Text(dealFinderProduct)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                Spacer()
+                NoopButton("Angebote", systemImage: "arrow.up.right", kind: .secondary) {
+                    guard let url = DealFinderLink.searchURL(for: dealFinderProduct) else { return }
+                    PlatformOpen.url(url)
+                }
             }
         }
     }
