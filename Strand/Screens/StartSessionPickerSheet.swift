@@ -2,13 +2,13 @@ import SwiftUI
 import StrandDesign
 import WhoopStore
 
-// MARK: - Start-session fork in the road (Live Session vs. Start Training)
+// MARK: - Start-workout fork in the road (Live Session vs. Start Training)
 //
-// Today's "Start session" used to go straight into a live BLE session. This is the shared
-// picker that now sits in front of it: two choices, each just forwarded via a callback — this
-// sheet owns no live-session or training-creation logic itself. "Start Training" reuses
-// `StartTrainingSheet` (TrainingView.swift) verbatim as a nested sheet, the same blank/template
-// chooser the Training tab's own "Start Training" button presents.
+// Today's "Start Workout" (formerly "Start session") used to go straight into a live BLE
+// session. This is the shared picker that now sits in front of it: two choices, each just
+// forwarded via a callback — this sheet owns no live-session or training-creation logic itself.
+// "Start Training" reuses `StartTrainingSheet` (TrainingView.swift) verbatim as a nested sheet,
+// the same blank/template chooser the Training tab's own "Start Training" button presents.
 
 struct StartSessionPickerSheet: View {
     /// Called (after this sheet dismisses) to start the existing live BLE/HR session.
@@ -22,7 +22,7 @@ struct StartSessionPickerSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space5) {
-            Text("Start Session")
+            Text("Start Workout")
                 .font(StrandFont.title2)
                 .foregroundStyle(StrandPalette.textPrimary)
             NoopButton("Live Session", systemImage: "shield.lefthalf.filled", kind: .primary, fullWidth: true) {

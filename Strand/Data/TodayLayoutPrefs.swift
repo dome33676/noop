@@ -45,7 +45,7 @@ enum TodaySection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .hero:           return String(localized: "Charge / Effort / Rest")
-        case .liveSession:    return String(localized: "Start session")
+        case .liveSession:    return String(localized: "Start Workout")
         case .synthesis:      return String(localized: "Synthesis")
         case .keyMetrics:     return String(localized: "Key Metrics")
         case .workouts:       return String(localized: "Workouts")

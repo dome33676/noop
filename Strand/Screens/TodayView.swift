@@ -1575,7 +1575,7 @@ struct TodayView: View {
             LiveSessionView(onClose: { showLiveSession = false })
         }
         #endif
-        // Start-session fork in the road (#today-live-session-picker): "Start session" no longer
+        // Start-workout fork in the road (#today-live-session-picker): "Start Workout" no longer
         // jumps straight into a live BLE session — it offers this choice first, then forwards into
         // the exact same LiveSessionView cover above or the same ActiveTrainingView flow the Training
         // tab's own "Start Training" uses.
@@ -1973,7 +1973,7 @@ struct TodayView: View {
                         .foregroundStyle(StrandPalette.metricCyan)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-                        Text("Start session")
+                        Text("Start Workout")
                             .font(StrandFont.headline)
                             .foregroundStyle(StrandPalette.textPrimary)
                         Text("Silent strap coaching against today's Charge.")

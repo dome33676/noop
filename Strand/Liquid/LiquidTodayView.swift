@@ -442,7 +442,7 @@ struct LiquidTodayView: View {
         // screen on iOS (nothing should compete with the ring mid-workout), a sheet on macOS where
         // fullScreenCover doesn't exist.
         .liveSessionCover(isPresented: $showLiveSession)
-        // Start-session fork in the road (#today-live-session-picker): "Start session" no longer
+        // Start-workout fork in the road (#today-live-session-picker): "Start Workout" no longer
         // jumps straight into a live BLE session — it offers this choice first, then forwards into
         // the exact same LiveSessionView cover above or the same ActiveTrainingView flow the Training
         // tab's own "Start Training" uses.
@@ -639,7 +639,7 @@ struct LiquidTodayView: View {
                     .foregroundStyle(StrandPalette.metricCyan)
                 // Theme-aware session-start chrome (#1160 parity): NoopPanelSurface + normal text
                 // tokens — light ink on Dark, dark ink on Light. (Was pinned-dark + on-dark tokens.)
-                Text("Start session")
+                Text("Start Workout")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textPrimary)
                 Text("BETA")
