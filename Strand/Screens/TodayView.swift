@@ -191,6 +191,7 @@ struct TodayView: View {
     /// classification and tint selection stable when the app language changes.
     private static let whoopBrandName = "WHOOP"
     @EnvironmentObject var repo: Repository
+    @EnvironmentObject var app: AppModel
     // PERF (scroll stutter): TodayView deliberately does NOT observe `LiveState` directly. A connected
     // strap publishes `LiveState` ~1 Hz (heart rate + each R-R packet), and an `@EnvironmentObject live`
     // here would invalidate the ENTIRE Today `body` on every tick, re-evaluating the scene backdrop, the
@@ -300,14 +301,18 @@ struct TodayView: View {
     // 14-day sparkline series, keyed by metric key. Loaded once in .task.
     @State private var sparks: [String: [Double]] = [:]
     @State private var workouts: [WorkoutRow] = []
+    // Training-tab strength sessions unioned into the same Latest-Workouts feed, windowed to 14 days
+    // (see `recentActivityFeed`) with each session's total volume precomputed alongside.
+    @State private var strengthSessions: [StrengthSessionRow] = []
+    @State private var strengthVolumeBySession: [String: Double] = [:]
     /// #1694: a tapped Latest-Workouts tile. Wrapped so `.sheet(item:)` drives presentation, mirroring
     /// WorkoutsView's own detail target — the feed was read-only, so the only route to a session's
     /// detail was More > Workouts.
-    private struct WorkoutDetailTarget: Identifiable {
-        let row: WorkoutRow
-        let id = UUID()
+    private struct ActivityDetailTarget: Identifiable {
+        let entry: RecentActivity
+        var id: String { entry.id }
     }
-    @State private var workoutDetail: WorkoutDetailTarget?
+    @State private var activityDetail: ActivityDetailTarget?
     @State private var appleDays: [AppleDaily] = []
     // Design Reset / #582, the pinned "Your cards" values (Stress / Fitness age / Vitality), surfaced
     // on Today so the buried Explore features sit on the home screen. Loaded in loadAll; nil hides the row.
@@ -402,6 +407,8 @@ struct TodayView: View {
     /// to the strap-status area — iOS-only, macOS's sidebar already lists every destination directly.
     @State private var showMoreIndex = false
     @State private var showLiveSession = false
+    @State private var showStartPicker = false
+    @State private var startedTraining: StartedTraining?
     /// The Updates inbox sheet (opened by the header bell). Shared across both platforms.
     @State private var showUpdatesInbox = false
 
@@ -846,6 +853,11 @@ struct TodayView: View {
         // unvalidated estimate as a calibrated reading in this table's Source column.
         if rawSource == spo2CandidateAttributionSource {
             return String(localized: "strap estimate (unverified)")
+        }
+        // Manual weight entry (`ManualWeightStore`): name it explicitly rather than falling through to
+        // the raw device id below.
+        if rawSource == ManualWeightStore.sourceId {
+            return String(localized: "Logged manually")
         }
         if rawSource.hasSuffix("-noop") { return String(localized: "On-device") }
         if rawSource == deviceId || rawSource == Repository.whoopSource { return Self.whoopBrandName }
@@ -1534,14 +1546,20 @@ struct TodayView: View {
                 hostedCardsRaw: $hostedCardsRaw
             )
         }
-        // #1694: the same read-only WorkoutDetailView the Workouts list opens. Nothing here can edit or
-        // delete, so a tap from Today carries no risk that list does not already carry. Rides its own
-        // NavigationStack because these shared screens are not in a per-screen one — mirrors WorkoutsView.
-        .sheet(item: $workoutDetail) { target in
+        // #1694: the same read-only WorkoutDetailView the Workouts list opens, or (for a unioned strength
+        // entry) TrainingView's own SessionDetailView. Nothing here can edit or delete, so a tap from
+        // Today carries no risk those lists don't already carry. Rides its own NavigationStack because
+        // these shared screens are not in a per-screen one — mirrors WorkoutsView.
+        .sheet(item: $activityDetail) { target in
             NavigationStack {
-                WorkoutDetailView(row: target.row)
-                    .environmentObject(repo)
+                switch target.entry {
+                case .cardio(let w):
+                    WorkoutDetailView(row: w)
+                case .strength(let s, _):
+                    SessionDetailView(session: s)
+                }
             }
+            .environmentObject(repo)
             #if os(iOS)
             .noopSheetPresentation(largeFirst: true)
             #else
@@ -1557,6 +1575,17 @@ struct TodayView: View {
             LiveSessionView(onClose: { showLiveSession = false })
         }
         #endif
+        // Start-session fork in the road (#today-live-session-picker): "Start session" no longer
+        // jumps straight into a live BLE session — it offers this choice first, then forwards into
+        // the exact same LiveSessionView cover above or the same ActiveTrainingView flow the Training
+        // tab's own "Start Training" uses.
+        .sheet(isPresented: $showStartPicker) {
+            StartSessionPickerSheet(
+                onLiveSession: { showLiveSession = true },
+                onStartTraining: { template in startTraining(from: template, repo: repo, into: $startedTraining) }
+            )
+        }
+        .activeTrainingCover(item: $startedTraining, repo: repo, model: app)
         // Honour a "Restore to Today" tap from the inbox: flip the matching dismissed flag back so the
         // card reappears (the inbox also clears the @AppStorage key directly, but this covers an
         // already-mounted Today). Cleared once handled.
@@ -1912,6 +1941,8 @@ struct TodayView: View {
             heartRateTrendSection
         case .recoveryVitals:
             recoveryVitalsSection
+        case .stressMonitor:
+            stressMonitorSection
         case .yourCards:
             yourCardsSection
         case .menstrualCycle:
@@ -1934,7 +1965,7 @@ struct TodayView: View {
     }
 
     private var liveSessionStartSection: some View {
-        Button { showLiveSession = true } label: {
+        Button { showStartPicker = true } label: {
             NoopCard(tint: StrandPalette.metricCyan) {
                 HStack(spacing: NoopMetrics.space3) {
                     Image(systemName: "shield.lefthalf.filled")
@@ -1965,6 +1996,41 @@ struct TodayView: View {
 
     private var recoveryVitalsSection: some View {
         recoveryVitalsCard(displayDay)
+    }
+
+    // MARK: - Stress monitor
+
+    /// Compact pinnable card for the Stress Monitor (#today-layout): the same `stressToday` score
+    /// TodayView already computes for the "Your Cards" stress row (StressModel, StressView-identical),
+    /// rendered as a small live vessel that pushes to the full `StressView()` on tap. No new state, no
+    /// new repo reads — mirrors `recoveryVitalsSection`'s idiom.
+    private var stressMonitorSection: some View {
+        let band = stressToday.map { StressBand(score: $0) }
+        let tint = stressToday.map { StressRamp.color($0) } ?? StressRamp.calm
+        return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Stress Monitor", overline: "Autonomic load",
+                          trailing: band?.title ?? String(localized: "Live"))
+            NavigationLink(value: TabRoute.stress) {
+                NoopCard(tint: tint) {
+                    HStack(spacing: NoopMetrics.space5) {
+                        LiquidVessel(value: min(1, max(0, (stressToday ?? 0) / 3)), tint: tint, animated: true)
+                            .frame(width: 64, height: 64)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(dashboardValue(.stress))
+                                .font(StrandFont.number(28)).foregroundStyle(StrandPalette.textPrimary)
+                            Text(band?.title ?? String(localized: "Calibrating"))
+                                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                                .foregroundStyle(tint)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the Stress Monitor")
+        }
     }
 
     @ViewBuilder
@@ -3882,22 +3948,53 @@ struct TodayView: View {
 
     // MARK: (c) LAST WORKOUTS, SAME grid, uniform 104pt workout tiles.
 
+    /// One entry in the unioned Latest-Workouts feed: a cardio/BLE/Apple-Health row, or a NOOP
+    /// Training-tab strength session (with its precomputed total volume). A single chronological list
+    /// rather than two sub-groups — the feed's tile is already generic (label/value/caption/accent/delta,
+    /// no sport-specific layout), so widening the element type is the smaller change than adding a second
+    /// header + grid for strength.
+    enum RecentActivity: Identifiable {
+        case cardio(WorkoutRow)
+        case strength(StrengthSessionRow, volumeKg: Double)
+
+        var id: String {
+            switch self {
+            case .cardio(let w): return "c-\(w.startTs)-\(w.sport)"
+            case .strength(let s, _): return "s-\(s.id)"
+            }
+        }
+        var startTs: Int {
+            switch self {
+            case .cardio(let w): return w.startTs
+            case .strength(let s, _): return s.startTs
+            }
+        }
+    }
+
     /// Android's Today feed contract (`TodayScreen.recentCutoff`): sessions starting on or after the
     /// start of the day 13 days back — 14 days counting today. Named rather than inlined so the window
-    /// is one thing on this platform too, and so the parity guard has something to point at.
-    static func recentWorkoutsFeed(_ rows: [WorkoutRow], now: Date = Date()) -> [WorkoutRow] {
+    /// is one thing on this platform too, and so the parity guard has something to point at. Unions the
+    /// cardio `workouts` feed with Training-tab `strengthSessions`, both windowed by the same cutoff, into
+    /// one newest-first list. A still-active strength session (`endTs == nil`) is skipped — same reason a
+    /// cardio workout never shows an in-progress row here.
+    static func recentActivityFeed(_ workouts: [WorkoutRow], _ sessions: [StrengthSessionRow],
+                                    volumes: [String: Double], now: Date = Date()) -> [RecentActivity] {
         let cal = Calendar.current
-        guard let cutoff = cal.date(byAdding: .day, value: -13, to: cal.startOfDay(for: now)) else { return rows }
+        guard let cutoff = cal.date(byAdding: .day, value: -13, to: cal.startOfDay(for: now)) else { return [] }
         let cutoffTs = Int(cutoff.timeIntervalSince1970)
-        return rows.filter { $0.startTs >= cutoffTs }
+        let cardio = workouts.filter { $0.startTs >= cutoffTs }.map(RecentActivity.cardio)
+        let strength = sessions.filter { $0.startTs >= cutoffTs && $0.endTs != nil }
+            .map { RecentActivity.strength($0, volumeKg: volumes[$0.id] ?? 0) }
+        return (cardio + strength).sorted { $0.startTs > $1.startTs }
     }
 
     @ViewBuilder
     private var workoutsSection: some View {
         // #1702: window HERE, not on `workouts`. That array is shared — it also feeds the Data Sources
         // Apple-workout count and the HR chart's sport glyphs, both all-time by design — so windowing it
-        // at the source would silently shrink two unrelated numbers on this same screen.
-        let recent = Self.recentWorkoutsFeed(workouts)
+        // at the source would silently shrink two unrelated numbers on this same screen. `strengthSessions`
+        // has no such all-time consumer on this screen, so it's fetched pre-windowed (loadHistoryWide).
+        let recent = Self.recentActivityFeed(workouts, strengthSessions, volumes: strengthVolumeBySession)
         if !recent.isEmpty {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 // "14 days" describes the window, like Android's today_workouts_14_days. The old
@@ -3905,18 +4002,30 @@ struct TodayView: View {
                 SectionHeader("Latest Workouts", overline: "Activity",
                               trailing: String(localized: "14 days"))
                 LazyVGrid(columns: grid, alignment: .leading, spacing: NoopMetrics.gap) {
-                    ForEach(Array(recent.prefix(6).enumerated()), id: \.offset) { _, w in
+                    ForEach(Array(recent.prefix(6).enumerated()), id: \.offset) { _, entry in
                         Button {
-                            workoutDetail = WorkoutDetailTarget(row: w)
+                            activityDetail = ActivityDetailTarget(entry: entry)
                         } label: {
-                            StatTile(
-                                label: "\(WorkoutSource.displaySport(w.sport))",
-                                value: workoutDuration(w),
-                                caption: workoutCaption(w),
-                                accent: StrandPalette.effortTint(fraction: (w.strain ?? 0) / StrainScorer.maxStrain),
-                                delta: w.energyKcal.map { "\(Int($0.rounded())) kcal" },
-                                deltaColor: StrandPalette.metricAmber
-                            )
+                            switch entry {
+                            case .cardio(let w):
+                                StatTile(
+                                    label: "\(WorkoutSource.displaySport(w.sport))",
+                                    value: workoutDuration(w),
+                                    caption: workoutCaption(w),
+                                    accent: StrandPalette.effortTint(fraction: (w.strain ?? 0) / StrainScorer.maxStrain),
+                                    delta: w.energyKcal.map { "\(Int($0.rounded())) kcal" },
+                                    deltaColor: StrandPalette.metricAmber
+                                )
+                            case .strength(let s, let vol):
+                                StatTile(
+                                    label: LocalizedStringKey(s.name),
+                                    value: strengthDuration(s),
+                                    caption: strengthCaption(s),
+                                    accent: StrandPalette.effortColor,
+                                    delta: "\(Int(vol.rounded())) kg",
+                                    deltaColor: StrandPalette.effortColor
+                                )
+                            }
                         }
                         // The Workouts list's own rows use this, not .plain: it is the iOS twin of
                         // Android's liquidPress, so the tile settles inward on press on both platforms.
@@ -4388,6 +4497,10 @@ struct TodayView: View {
         // assignment order as before. (The Rest score + provenance resolves moved to loadDayScoped, #755.)
         async let stepsEstSeriesA    = repo.exploreSeries(key: "steps_est", source: "my-whoop")
         async let workoutsA          = repo.workoutRows()
+        // Training-tab strength sessions unioned into the Latest-Workouts card. Fetched pre-windowed
+        // (unlike `workouts`, which stays all-time for its other consumers on this screen) since nothing
+        // else here needs strength sessions beyond the 14-day feed.
+        async let strengthA          = repo.strengthSessions(days: 14)
         async let appleDaysA         = repo.appleDailyRows()
         async let xStepsA            = repo.series(key: "steps", source: "xiaomi-band")
         async let xSleepA            = repo.series(key: "sleep_total_min", source: "xiaomi-band")
@@ -4415,6 +4528,18 @@ struct TodayView: View {
                                    uniquingKeysWith: { _, last in last })
 
         workouts = await workoutsA
+        // Each session's total volume (kg), fetched concurrently — the window is 14 days, so this is a
+        // handful of `strengthSets` reads at most.
+        let sessions = await strengthA
+        strengthSessions = sessions
+        var volumes: [String: Double] = [:]
+        await withTaskGroup(of: (String, Double).self) { group in
+            for s in sessions {
+                group.addTask { (s.id, await repo.strengthSessionVolume(sessionId: s.id)) }
+            }
+            for await (id, vol) in group { volumes[id] = vol }
+        }
+        strengthVolumeBySession = volumes
         appleDays = await appleDaysA
         // Mi Band (Mi Fitness import), distinct days across its representative metric keys.
         let xSteps = await xStepsA
@@ -5018,6 +5143,26 @@ struct TodayView: View {
         )
         guard w.endTs > w.startTs else { return "\(date) · \(Self.hrTimeFmt.string(from: start))" }
         let end = Date(timeIntervalSince1970: TimeInterval(w.endTs))
+        return "\(date) · \(Self.hrTimeFmt.string(from: start))-\(Self.hrTimeFmt.string(from: end))"
+    }
+
+    /// `workoutDuration`'s twin for a strength session (`recentActivityFeed` only ever passes one with a
+    /// real `endTs`, but this stays nil-safe rather than force-unwrapping).
+    private func strengthDuration(_ s: StrengthSessionRow) -> String {
+        let secs = Double(max((s.endTs ?? s.startTs) - s.startTs, 0))
+        let mins = Int((secs / 60).rounded())
+        if mins >= 60 { return String(localized: "\(mins / 60)h \(mins % 60)m") }
+        return String(localized: "\(mins)m")
+    }
+
+    /// `workoutCaption`'s twin for a strength session.
+    private func strengthCaption(_ s: StrengthSessionRow) -> String {
+        let start = Date(timeIntervalSince1970: TimeInterval(s.startTs))
+        let date = start.formatted(
+            .dateTime.day().month(.abbreviated).locale(AppLanguage.activeLocale)
+        )
+        guard let endTs = s.endTs, endTs > s.startTs else { return "\(date) · \(Self.hrTimeFmt.string(from: start))" }
+        let end = Date(timeIntervalSince1970: TimeInterval(endTs))
         return "\(date) · \(Self.hrTimeFmt.string(from: start))-\(Self.hrTimeFmt.string(from: end))"
     }
 

@@ -29,23 +29,23 @@ final class TodayWorkoutsWindowTests: XCTestCase {
     }
 
     func testKeepsASessionExactlyOnTheCutoff() {
-        let kept = TodayView.recentWorkoutsFeed([row(startingAt: cutoffTs)], now: now)
+        let kept = TodayView.recentActivityFeed([row(startingAt: cutoffTs)], [], volumes: [:], now: now)
         XCTAssertEqual(kept.count, 1, "the cutoff instant is inside the window, matching Android's >=")
     }
 
     func testDropsTheSecondBeforeTheCutoff() {
-        let kept = TodayView.recentWorkoutsFeed([row(startingAt: cutoffTs - 1)], now: now)
+        let kept = TodayView.recentActivityFeed([row(startingAt: cutoffTs - 1)], [], volumes: [:], now: now)
         XCTAssertTrue(kept.isEmpty)
     }
 
     func testDropsAnAllTimeSessionThatUsedToShow() {
         // The behaviour the issue described: a session from months ago listed under "Latest".
         let threeMonthsAgo = Int(now.timeIntervalSince1970) - 90 * 86_400
-        XCTAssertTrue(TodayView.recentWorkoutsFeed([row(startingAt: threeMonthsAgo)], now: now).isEmpty)
+        XCTAssertTrue(TodayView.recentActivityFeed([row(startingAt: threeMonthsAgo)], [], volumes: [:], now: now).isEmpty)
     }
 
     func testKeepsTodaysSession() {
-        let kept = TodayView.recentWorkoutsFeed([row(startingAt: Int(now.timeIntervalSince1970))], now: now)
+        let kept = TodayView.recentActivityFeed([row(startingAt: Int(now.timeIntervalSince1970))], [], volumes: [:], now: now)
         XCTAssertEqual(kept.count, 1)
     }
 
@@ -53,7 +53,8 @@ final class TodayWorkoutsWindowTests: XCTestCase {
         let recentA = Int(now.timeIntervalSince1970) - 3_600
         let recentB = Int(now.timeIntervalSince1970) - 7_200
         let stale = cutoffTs - 86_400
-        let kept = TodayView.recentWorkoutsFeed([row(startingAt: recentA), row(startingAt: stale), row(startingAt: recentB)], now: now)
+        let kept = TodayView.recentActivityFeed(
+            [row(startingAt: recentA), row(startingAt: stale), row(startingAt: recentB)], [], volumes: [:], now: now)
         XCTAssertEqual(kept.map(\.startTs), [recentA, recentB], "filtering must not reorder the feed")
     }
 }

@@ -31,7 +31,9 @@ struct JournalReminderCard: View {
 
     var body: some View {
         Group {
-            if reminderEnabled, let logged = loggedDays {
+            if !reminderEnabled {
+                disabledHint
+            } else if let logged = loggedDays {
                 card(logged)
             }
         }
@@ -39,6 +41,17 @@ struct JournalReminderCard: View {
         // so the strip and the "logged today" state stay current after the user logs and comes back.
         .task(id: JournalReminderLoadKey(seq: repo.refreshSeq, enabled: reminderEnabled)) {
             await reload()
+        }
+    }
+
+    /// When the section is placed in Today (this view was even instantiated) but the reminder toggle is
+    /// off, a silent empty Group is indistinguishable from a bug — nothing explains why the card is
+    /// missing. One calm line instead, no chrome beyond the card itself.
+    private var disabledHint: some View {
+        NoopCard {
+            Text(String(localized: "Journal reminder is off — enable it in Settings → Features"))
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textTertiary)
         }
     }
 

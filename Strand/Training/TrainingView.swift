@@ -14,7 +14,7 @@ struct TrainingView: View {
     @State private var sessions: [StrengthSessionRow] = []
     @State private var loaded = false
     /// The session + template a just-started training should open with, set as ONE atomic value
-    /// (not two separate `@State` vars) — see `startTraining(from:)`.
+    /// (not two separate `@State` vars) — see `startTraining(from:repo:into:)` in TrainingLauncher.swift.
     @State private var startedTraining: StartedTraining?
     @State private var showStartPicker = false
     @State private var templates: [StrengthTemplateRow] = []
@@ -102,7 +102,7 @@ struct TrainingView: View {
         }
         .sheet(isPresented: $showStartPicker) {
             StartTrainingSheet { template in
-                startTraining(from: template)
+                startTraining(from: template, repo: repo, into: $startedTraining)
             }
         }
         .sheet(isPresented: $showNewTemplate) {
@@ -118,18 +118,7 @@ struct TrainingView: View {
         .sheet(isPresented: $showBackfill) {
             BackfillTrainingSheet(onSaved: { Task { await reload() } })
         }
-        // A just-started session is presented full-screen (matching the Live-session convention:
-        // an in-progress session owns the whole display) rather than pushed — `.navigationDestination
-        // (item:)` needs macOS 14, and this file compiles into the macOS 13 target too.
-        #if os(iOS)
-        .fullScreenCover(item: $startedTraining) { started in
-            ActiveTrainingView(session: started.session, repo: repo, model: model, template: started.template)
-        }
-        #else
-        .sheet(item: $startedTraining) { started in
-            ActiveTrainingView(session: started.session, repo: repo, model: model, template: started.template)
-        }
-        #endif
+        .activeTrainingCover(item: $startedTraining, repo: repo, model: model)
     }
 
     private func sessionRow(_ session: StrengthSessionRow) -> some View {
@@ -159,29 +148,6 @@ struct TrainingView: View {
     private static let dateFmt: DateFormatter = {
         let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short; return f
     }()
-
-    /// Bundles a just-started session with the template it was started from — set as ONE `@State`
-    /// value in `startTraining(from:)` rather than two separate ones, so the session and its template
-    /// can never be observed out of sync with each other (the earlier two-`@State` version could
-    /// intermittently open a session whose exercises hadn't come from its template: "select a
-    /// template, sometimes its exercises don't make it into the training").
-    private struct StartedTraining: Identifiable {
-        let session: StrengthSessionRow
-        let template: StrengthTemplateRow?
-        var id: String { session.id }
-    }
-
-    private func startTraining(from template: StrengthTemplateRow?) {
-        let session = StrengthSessionRow(
-            id: UUID().uuidString, deviceId: WhoopStore.strengthLogSourceId,
-            name: template?.name ?? "Training — " + Self.dateFmt.string(from: Date()),
-            startTs: Int(Date().timeIntervalSince1970), endTs: nil, notes: nil
-        )
-        Task {
-            await repo.saveStrengthSession(session)
-            startedTraining = StartedTraining(session: session, template: template)
-        }
-    }
 
     private func reload() async {
         sessions = await repo.strengthSessions()
@@ -219,7 +185,7 @@ struct TrainingView: View {
 
 // MARK: - Start-training chooser (blank vs. a saved template)
 
-private struct StartTrainingSheet: View {
+struct StartTrainingSheet: View {
     /// nil = start blank.
     let onPick: (StrengthTemplateRow?) -> Void
     @EnvironmentObject private var repo: Repository
@@ -268,7 +234,7 @@ private struct StartTrainingSheet: View {
 
 // MARK: - Past session detail (read-only)
 
-private struct SessionDetailView: View {
+struct SessionDetailView: View {
     private struct ExerciseGroup: Identifiable {
         let name: String
         let sets: [StrengthSetRow]

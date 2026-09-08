@@ -2633,6 +2633,17 @@ final class Repository: ObservableObject {
                                               sessionId: sessionId)) ?? []
     }
 
+    /// Total volume (kg) moved in a session: Σ weight×reps across its non-warmup weighted sets — the same
+    /// formula `ExerciseProgressionView.points` uses per exercise, shared here so Today's cards don't
+    /// each re-derive it.
+    func strengthSessionVolume(sessionId: String) async -> Double {
+        let sets = await strengthSets(sessionId: sessionId)
+        return sets.reduce(0.0) { sum, set in
+            guard !set.isWarmup, let weight = set.weightKg else { return sum }
+            return sum + (set.reps.map { weight * Double($0) } ?? weight)
+        }
+    }
+
     /// Every logged set for one exercise across all sessions, oldest first — the progression chart's
     /// source data.
     func strengthSets(exerciseName: String) async -> [StrengthSetRow] {

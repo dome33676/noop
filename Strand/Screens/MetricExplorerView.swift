@@ -530,6 +530,8 @@ struct MetricDetailView: View {
     @EnvironmentObject var intelligence: IntelligenceEngine
     /// True while a manual Fitness Age refresh runs (spinner on the not-ready empty state).
     @State private var refreshing = false
+    /// Drives the "Add value" entry point (weight only — see `load()`'s manual-weight merge).
+    @State private var showAddWeight = false
 
     // Imperial/Metric display preference (D#103). Display-only: weight (kg) and skin temp (°C) re-label
     // here; everything else is unit-agnostic and renders unchanged.
@@ -787,6 +789,22 @@ struct MetricDetailView: View {
         // Range changes the window, hence the correlation inputs — recompute the
         // cached scan rather than letting `correlationCard` run it inside body.
         .onChangeCompat(of: range) { _ in recomputeCorrelations() }
+        // "Add value" — weight only, the one metric with a manual-entry path (see `load()`'s merge).
+        .toolbar {
+            if metric.key == "weight" {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showAddWeight = true } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("Add weight")
+                }
+            }
+        }
+        .sheet(isPresented: $showAddWeight) {
+            // Direct reload (no refreshSeq dependency), mirroring the Fitness-Age manual-refresh button
+            // above — the new/backfilled value should show on THIS open screen immediately.
+            AddWeightSheet(onSaved: { Task { await load() } })
+        }
     }
 
     /// Two phases, because the screen used to wait for data it does not draw.
@@ -848,6 +866,24 @@ struct MetricDetailView: View {
                 for point in candidateSeries where byDay[point.day] == nil {
                     byDay[point.day] = point.value
                     sourceByDay[point.day] = spo2CandidateAttributionSource
+                }
+                series = byDay.sorted { $0.key < $1.key }.map { (day: $0.key, value: $0.value) }
+            }
+        }
+        // Manual weight entry: a hand-logged value OVERRIDES whatever Apple Health carries for that
+        // day — the inverse priority from the spo2 candidate block above (which only fills gaps). Weight
+        // is a single daily scalar, so "the user typed a number for today" should always be what's
+        // shown, not a possibly stale or absent Health sync. Everything downstream of this point (hero,
+        // chart, stat tiles, readings table) reads only `series`/`sourceByDay`, so this one merge is
+        // sufficient — no other rendering code needs to change.
+        if metric.key == "weight", metric.source == "apple-health" {
+            let manualPoints = await repo.manualWeightSeries()
+            if !manualPoints.isEmpty {
+                var byDay = Dictionary(series.map { ($0.day, $0.value) },
+                                       uniquingKeysWith: { first, _ in first })
+                for point in manualPoints {
+                    byDay[point.day] = point.value
+                    sourceByDay[point.day] = ManualWeightStore.sourceId
                 }
                 series = byDay.sorted { $0.key < $1.key }.map { (day: $0.key, value: $0.value) }
             }

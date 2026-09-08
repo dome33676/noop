@@ -20,6 +20,7 @@ struct LiquidTodayView: View {
     @EnvironmentObject var repo: Repository
     @EnvironmentObject var router: NavRouter
     @EnvironmentObject var profile: ProfileStore
+    @EnvironmentObject var model: AppModel
     // For the pull-to-sync gesture (#334): a pull kicks a manual strap history offload via ble.syncNow().
     // Observe BLEManager, NOT AppModel — AppModel @Publishes `bpm` on the ~1 Hz HR tick, so observing it
     // would re-render all of Today every second (the exact churn the LiveState leaves isolate). BLEManager
@@ -64,6 +65,11 @@ struct LiquidTodayView: View {
     @State private var importedActiveKcalDay: Double?  // #616: Apple Health active energy for the day (calorie fallback)
     @State private var hrValues: [Double] = []     // hrBuckets since midnight → 5-min means
     @State private var workouts: [WorkoutRow] = [] // newest-first
+    // Training-tab strength sessions unioned into the Last Workouts teaser (14-day window, same as
+    // classic Today's card — see `TodayView.RecentActivity`/`recentActivityFeed`).
+    @State private var strengthSessions: [StrengthSessionRow] = []
+    @State private var activityDetail: ActivityDetailTarget?
+    @State private var strengthVolumeBySession: [String: Double] = [:]
     /// #today-hosted-cards: the shared SleepModel that backs every SleepModel-derived hosted sleep card
     /// (Stages vs typical today; more to follow). Built ONCE in `load()` from the SAME inputs the Sleep tab
     /// uses (`SleepModel.build`), and only when a sleep-origin card is actually hosted — so a Today with no
@@ -82,6 +88,8 @@ struct LiquidTodayView: View {
     #endif
     @State private var synthesisExpanded = false
     @State private var showLiveSession = false
+    @State private var showStartPicker = false
+    @State private var startedTraining: StartedTraining?
 
     /// Live Sessions (silent guardian) beta gate — the SAME key the Settings toggle writes. Default ON
     /// (the entry is BETA-labelled in-UI); off removes the Start-session control entirely.
@@ -313,13 +321,15 @@ struct LiquidTodayView: View {
                         case .workouts: lastWorkoutsSection
                         case .heartRate: heartRateSection
                         case .recoveryVitals: recoveryVitalsSection
+                        case .stressMonitor: stressMonitorSection
                         case .yourCards: yourCardsSection
                         case .menstrualCycle:
                             if selectedDayOffset == 0 { MenstrualCycleHomeCard() }
                         // #656: the persistent journal widget (last-7-days strip + tap-through). Now a
                         // reorderable section like the others — the Arrange sheet moves it. Today only;
-                        // the card self-hides when the reminder toggle is off (an empty branch renders
-                        // nothing yet keeps its slot). Twin of Android TodayScreen's JOURNAL arm.
+                        // the card shows a one-line "reminder is off" hint instead of the strip when the
+                        // reminder toggle is off (keeps its slot either way). Twin of Android TodayScreen's
+                        // JOURNAL arm.
                         case .journal: if selectedDayOffset == 0 { JournalReminderCard() }
                         // #today-hosted-cards: cards the user pulled in from the Trends/Sleep tabs, in the
                         // order they arranged. Empty (renders nothing) until they add one in Customise.
@@ -432,6 +442,17 @@ struct LiquidTodayView: View {
         // screen on iOS (nothing should compete with the ring mid-workout), a sheet on macOS where
         // fullScreenCover doesn't exist.
         .liveSessionCover(isPresented: $showLiveSession)
+        // Start-session fork in the road (#today-live-session-picker): "Start session" no longer
+        // jumps straight into a live BLE session — it offers this choice first, then forwards into
+        // the exact same LiveSessionView cover above or the same ActiveTrainingView flow the Training
+        // tab's own "Start Training" uses.
+        .sheet(isPresented: $showStartPicker) {
+            StartSessionPickerSheet(
+                onLiveSession: { showLiveSession = true },
+                onStartTraining: { template in startTraining(from: template, repo: repo, into: $startedTraining) }
+            )
+        }
+        .activeTrainingCover(item: $startedTraining, repo: repo, model: model)
         #if os(macOS)
         // Hide the mac window toolbar's vibrant material so the full-bleed day-of-sky reads dark + edge-to-edge
         // at the top instead of the white scroll-under-titlebar wash.
@@ -611,7 +632,7 @@ struct LiquidTodayView: View {
     /// Charge its band is gated on. Same translucent chrome as the hero card so it reads as part of the
     /// sky scene, quiet by design.
     private var liveSessionStartRow: some View {
-        Button { showLiveSession = true } label: {
+        Button { showStartPicker = true } label: {
             HStack(spacing: 10) {
                 Image(systemName: "shield.lefthalf.filled")
                     .font(.system(size: 14, weight: .semibold))
@@ -696,6 +717,41 @@ struct LiquidTodayView: View {
             }
             .buttonStyle(LiquidPressStyle())
             .accessibilityHint("Opens the full-day heart rate timeline")
+        }
+    }
+
+    // MARK: - Stress monitor
+
+    /// Compact pinnable card for the Stress Monitor (#today-layout): the same `stress` score Liquid
+    /// Today already computes for the "Your Cards" stress row (StressModel, StressView-identical),
+    /// rendered as a small live vessel that pushes to the full `StressView()` on tap. No new state, no
+    /// new repo reads — mirrors `heartRateSection`'s idiom.
+    private var stressMonitorSection: some View {
+        let band = stress.map { StressBand(score: $0) }
+        let tint = stress.map { StressRamp.color($0) } ?? StressRamp.calm
+        return VStack(spacing: 8) {
+            sectionHead("STRESS MONITOR", trailing: band?.title ?? String(localized: "Live"))
+            NavigationLink(value: TabRoute.stress) {
+                card {
+                    HStack(spacing: NoopMetrics.space5) {
+                        LiquidVessel(value: fracOver(stress, 3), tint: tint, animated: dataLoaded)
+                            .frame(width: 60, height: 60)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(stressText).font(StrandFont.number(26)).foregroundStyle(StrandPalette.textPrimary)
+                            Text(band?.title ?? String(localized: "Calibrating"))
+                                .font(StrandFont.overlineScaled(11)).tracking(1.0)
+                                .foregroundStyle(tint)
+                            Text("Autonomic load, HRV & resting HR")
+                                .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
+                }
+            }
+            .buttonStyle(LiquidPressStyle())
+            .accessibilityHint("Opens the Stress Monitor")
         }
     }
 
@@ -1357,11 +1413,24 @@ struct LiquidTodayView: View {
 
     // MARK: - Last workouts
 
+    /// #1694 twin: a tapped Latest-Workouts teaser. Wrapped so `.sheet(item:)` drives presentation,
+    /// mirroring TodayView's own `ActivityDetailTarget` — see its doc comment for why a sheet, not a
+    /// `TabRoute` push (a strength entry has no per-row destination on the cardio-only Workouts tab).
+    private struct ActivityDetailTarget: Identifiable {
+        let entry: TodayView.RecentActivity
+        var id: String { entry.id }
+    }
+
     private var lastWorkoutsSection: some View {
-        VStack(spacing: 8) {
-            sectionHead("LAST WORKOUTS", trailing: "\(workouts.count) total")
-            if let w = workouts.first {
-                NavigationLink(value: TabRoute.workouts) { workoutCard(w) }
+        // Same 14-day cardio+strength union as classic Today's card (TodayView.recentActivityFeed) — this
+        // teaser only ever shows the single most-recent entry across both sources. The trailing count
+        // matches the SAME 14-day window and excludes still-active (endTs == nil) strength sessions, so it
+        // never disagrees with what `recent` itself would show if there were more than one entry.
+        let recent = TodayView.recentActivityFeed(workouts, strengthSessions, volumes: strengthVolumeBySession)
+        return VStack(spacing: 8) {
+            sectionHead("LAST WORKOUTS", trailing: "\(recent.count) total")
+            if let top = recent.first {
+                Button { activityDetail = ActivityDetailTarget(entry: top) } label: { activityCard(top) }
                     .buttonStyle(LiquidPressStyle())
             } else {
                 card {
@@ -1371,6 +1440,27 @@ struct LiquidTodayView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+        }
+        // Rides its own NavigationStack + explicit environmentObject re-injection, mirroring TodayView's
+        // twin sheet — these shared detail screens aren't hosted in a per-screen NavigationStack here.
+        .sheet(item: $activityDetail) { target in
+            NavigationStack {
+                switch target.entry {
+                case .cardio(let w): WorkoutDetailView(row: w)
+                case .strength(let s, _): SessionDetailView(session: s)
+                }
+            }
+            .environmentObject(repo)
+        }
+    }
+
+    @ViewBuilder
+    private func activityCard(_ entry: TodayView.RecentActivity) -> some View {
+        switch entry {
+        case .cardio(let w):
+            workoutCard(w)
+        case .strength(let s, let vol):
+            strengthCard(s, volumeKg: vol)
         }
     }
 
@@ -1389,6 +1479,24 @@ struct LiquidTodayView: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
                 LiquidTube(frac: (w.strain ?? 0) / 100, tint: StrandPalette.effortColor, height: 12, animated: false)
+            }
+        }
+    }
+
+    /// `workoutCard`'s twin for a strength session — a plain header row, no `LiquidTube` bar: there's no
+    /// natural 0–100 scale for volume to drive that bar, and fabricating one would invent a metric nobody
+    /// asked for. Keeps the card's height/density identical to the cardio-only card.
+    private func strengthCard(_ s: StrengthSessionRow, volumeKg: Double) -> some View {
+        card {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(LocalizedStringKey(s.name)).font(StrandFont.number(15))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Text(strengthSub(s)).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                }
+                Spacer()
+                (Text("\(Int(volumeKg.rounded())) kg").font(StrandFont.number(15)) + Text(" VOLUME").font(StrandFont.overlineScaled(9)))
+                    .foregroundStyle(StrandPalette.textPrimary)
             }
         }
     }
@@ -1500,6 +1608,9 @@ struct LiquidTodayView: View {
         async let appleA = repo.appleDailyRows()
         async let hrA = repo.hrBuckets(from: from, to: to, bucketSeconds: 300)
         async let wkA = repo.workoutRows()
+        // Training-tab strength sessions for the Last Workouts teaser, pre-windowed to 14 days like
+        // classic Today's card — this teaser only ever shows the single most-recent entry.
+        async let strengthA = repo.strengthSessions(days: 14)
         // Ask the same cross-source resolver the Classic Today view uses which source actually won each
         // displayed score. Include the exact carried-Charge day; a fixed relative lookback can miss a
         // legitimately old carried score.
@@ -1595,6 +1706,16 @@ struct LiquidTodayView: View {
         importedActiveKcalDay = (await appleA).filter { $0.day == selectedDayKey }.compactMap { $0.activeKcal }.max()
         hrValues = (await hrA).map { $0.bpm }
         workouts = await wkA
+        let sessions = await strengthA
+        strengthSessions = sessions
+        var strengthVolumes: [String: Double] = [:]
+        await withTaskGroup(of: (String, Double).self) { group in
+            for s in sessions {
+                group.addTask { (s.id, await repo.strengthSessionVolume(sessionId: s.id)) }
+            }
+            for await (id, vol) in group { strengthVolumes[id] = vol }
+        }
+        strengthVolumeBySession = strengthVolumes
 
         let (chargeSource, effortSource, restSource) = await (chargeSourceA, effortSourceA, restSourceA)
         let sourceResolutions = [
@@ -1803,6 +1924,13 @@ struct LiquidTodayView: View {
         if let dm = w.distanceM, dm > 0 { parts.append(String(format: "%.1f km", locale: AppLanguage.activeLocale, dm / 1000)) }
         if let k = w.energyKcal { parts.append("\(Int(k.rounded())) kcal") }
         return parts.joined(separator: " · ")
+    }
+
+    /// `workoutSub`'s twin for a strength session — just its duration (there's no distance/kcal for a
+    /// logged lifting session).
+    private func strengthSub(_ s: StrengthSessionRow) -> String {
+        let secs = Double(max((s.endTs ?? s.startTs) - s.startTs, 0))
+        return "\(Int(secs / 60)) min"
     }
 
     private var dateLine: String {
