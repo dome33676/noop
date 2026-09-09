@@ -1,4 +1,5 @@
 import Foundation
+import WhoopStore
 
 /// The user's own custom exercises — remembered globally once added, so a name typed for one
 /// template/backfill/live-add shows up as a pickable suggestion everywhere else too, instead of
@@ -25,5 +26,20 @@ enum CustomExerciseStore {
         guard !current.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) else { return }
         current.append(trimmed)
         UserDefaults.standard.set(current, forKey: key)
+    }
+
+    private static let backfillDoneKey = "training.customExerciseBackfillDone"
+
+    /// One-time backfill: remembers every exercise name already used in a LOGGED SET or a SAVED
+    /// TEMPLATE, so history that predates this store's existence (every custom name typed before
+    /// today) still becomes a global suggestion instead of only names typed from now on. Runs at
+    /// most once ever (a UserDefaults flag), so it's safe to call unconditionally on every Training
+    /// tab open — after the first run it's just a flag check.
+    static func backfillIfNeeded(repo: Repository) async {
+        guard !UserDefaults.standard.bool(forKey: backfillDoneKey) else { return }
+        let logged = await repo.distinctLoggedExerciseNames()
+        let planned = await repo.strengthTemplates().flatMap { $0.plan.map(\.exerciseName) }
+        for name in Set(logged + planned) { remember(name) }
+        UserDefaults.standard.set(true, forKey: backfillDoneKey)
     }
 }

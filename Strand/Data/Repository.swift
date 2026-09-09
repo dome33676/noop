@@ -2652,6 +2652,12 @@ final class Repository: ObservableObject {
                                               exerciseName: exerciseName)) ?? []
     }
 
+    /// Every distinct exercise name ever logged — the `CustomExerciseStore` backfill's source.
+    func distinctLoggedExerciseNames() async -> [String] {
+        guard let store = await ensureStore() else { return [] }
+        return (try? await store.distinctExerciseNames(deviceId: WhoopStore.strengthLogSourceId)) ?? []
+    }
+
     /// Log (or edit, by re-passing the same `id`) one set.
     func logStrengthSet(_ set: StrengthSetRow) async {
         guard let store = await ensureStore() else { return }

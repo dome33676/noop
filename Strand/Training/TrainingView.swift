@@ -99,6 +99,7 @@ struct TrainingView: View {
         .task {
             await reload()
             await reloadTemplates()
+            await CustomExerciseStore.backfillIfNeeded(repo: repo)
         }
         .sheet(isPresented: $showStartPicker) {
             StartTrainingSheet { template in

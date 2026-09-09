@@ -195,4 +195,13 @@ extension WhoopStore {
             return db.changesCount > 0
         }
     }
+
+    /// Every distinct exercise name ever logged — the one-time `CustomExerciseStore` backfill's
+    /// source, so a name typed before that store existed still becomes a global suggestion.
+    public func distinctExerciseNames(deviceId: String) async throws -> [String] {
+        try syncRead { db in
+            try String.fetchAll(db, sql: "SELECT DISTINCT exerciseName FROM strengthSet WHERE deviceId = ?",
+                                arguments: [deviceId])
+        }
+    }
 }
