@@ -37,10 +37,21 @@ struct JournalReminderCard: View {
                 card(logged)
             }
         }
-        // Re-read whenever a sync bumps refreshSeq or the toggle flips (mirrors AutoWorkoutCard's task id),
-        // so the strip and the "logged today" state stay current after the user logs and comes back.
-        .task(id: JournalReminderLoadKey(seq: repo.refreshSeq, enabled: reminderEnabled)) {
+        // Keyed ONLY on `reminderEnabled`, deliberately NOT on `repo.refreshSeq`: `.task(id:)` CANCELS
+        // and restarts its work every time the id changes, and a cold launch bumps refreshSeq several
+        // times in quick succession (multiple sequential sync/backfill passes) — keying on it here
+        // meant this card's very first load kept getting cancelled mid-flight before `loggedDays` could
+        // ever be assigned, so BOTH branches of the Group above missed (not `!reminderEnabled`, not a
+        // non-nil `loggedDays` either) and the whole section silently vanished for the rest of the
+        // session. A later refreshSeq bump (e.g. flipping the Settings toggle re-fires this task via
+        // `reminderEnabled` changing) would eventually land once the launch burst settled, which is why
+        // toggling off/on "fixed" it. Post-launch reloads now go through `.onChangeCompat` below, which
+        // fires a plain `reload()` call without cancelling anything already in flight.
+        .task(id: reminderEnabled) {
             await reload()
+        }
+        .onChangeCompat(of: repo.refreshSeq) { _ in
+            Task { await reload() }
         }
     }
 
@@ -153,10 +164,4 @@ struct JournalReminderCard: View {
             Repository.localDayKey(cal.date(byAdding: .day, value: -n, to: today) ?? today)
         }
     }
-}
-
-/// Reload key: a sync (seq) or toggle flip re-reads completion. Mirrors `AutoWorkoutLoadKey`.
-private struct JournalReminderLoadKey: Equatable {
-    let seq: Int
-    let enabled: Bool
 }

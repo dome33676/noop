@@ -263,13 +263,18 @@ struct RootTabView: View {
         guard PuffinExperiment.journalReminderEnabled else { return }
         Task {
             let now = Int(Date().timeIntervalSince1970)
-            // Last ~2 days is enough to cover the 12h window with margin; matches the existing
-            // JournalReminderCard's window sizing philosophy (recent-window reads, not full history).
-            let sessions = await repo.sleepSessions(from: now - 2 * 86_400, to: now + 3_600)
-            // Unlike Android's `sleeps.lastOrNull()`, repo.sleepSessions(from:to:) is NOT guaranteed
-            // globally sorted when multiple device ids are unioned (Repository.swift's unionSleepSessions
-            // concatenates per-id ASC-sorted lists without a final sort) — so take the max endTs
-            // explicitly rather than `.last`, to always mean "the freshest night" regardless of union order.
+            // `repo.sleepSessions(from:to:)` only reads the IMPORTED source and returns nothing for a
+            // Bluetooth-only strap with no WHOOP/Apple-Health import — every night banks under the
+            // COMPUTED source instead (see Repository.computedSleepSessions's own doc comment, #1150),
+            // which is exactly why this never fired across two full days of real testing: an empty
+            // read here means an empty `sessions` array, the `latestEnd` guard fails, and the function
+            // returns early every single time, regardless of how much time passes. `allSleepSessions`
+            // unions BOTH sources (imported wins where it covers a night, computed fills the rest), so
+            // it finds a wake time regardless of which source this device actually writes to. 2 days is
+            // enough to cover the 12h window with margin; matches JournalReminderCard's window sizing.
+            let sessions = await repo.allSleepSessions(days: 2)
+            // Not guaranteed sorted by END time (allSleepSessions sorts by START/onset) — take the max
+            // endTs explicitly, to always mean "the freshest night" regardless of sort order.
             guard let latestEnd = sessions.map(\.endTs).max() else { return }
             let hoursAgo = Double(now - latestEnd) / 3600.0
             guard (0.0...12.0).contains(hoursAgo) else { return }
