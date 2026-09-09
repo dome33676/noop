@@ -32,6 +32,10 @@ struct WorkoutsView: View {
     @EnvironmentObject var model: AppModel
     @State private var showLiveWorkout = false
     @State private var showStartSport = false
+    /// A just-started Training template, presented via the shared `.activeTrainingCover` — see
+    /// `TrainingLauncher.swift`. Set from the "My Templates" section `StartWorkoutSheet` now offers
+    /// alongside the sport catalogue.
+    @State private var startedTraining: StartedTraining?
 
     // Imperial/Metric display preference (D#103). Workout distances are stored in metres; the toggle
     // re-labels them to miles/yards. Display-only — nothing on disk changes.
@@ -280,11 +284,14 @@ struct WorkoutsView: View {
         // #519: name the sport before a live session starts, then open the in-exercise view directly
         // (same direct present as the button's already-active path — no cross-view auto-present race).
         .workoutSelectionCover(isPresented: $showStartSport) {
-            StartWorkoutSheet { name in
+            StartWorkoutSheet(onStartTemplate: { template in
+                startTraining(from: template, repo: repo, into: $startedTraining)
+            }) { name in
                 model.startWorkout(sport: name)
                 showLiveWorkout = true
             }
         }
+        .activeTrainingCover(item: $startedTraining, repo: repo, model: model)
         // #64: name the merged session when every selected row is a bare detected bout (there's no sport
         // to inherit). Reuses the "Start a workout" named-sport picker.
         .workoutSelectionCover(item: $mergeSportPrompt) { target in

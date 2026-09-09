@@ -22,6 +22,7 @@ struct FoodItemEditorSheet: View {
     @State private var proteinText: String
     @State private var carbsText: String
     @State private var fatText: String
+    @State private var servingSizeText: String
     @State private var barcode: String?
 
     @State private var offQuery = ""
@@ -33,7 +34,7 @@ struct FoodItemEditorSheet: View {
     @State private var scanNotFound = false
     #endif
 
-    private enum NumberField: Hashable { case kcal, protein, carbs, fat }
+    private enum NumberField: Hashable { case kcal, protein, carbs, fat, servingSize }
     @FocusState private var focusedField: NumberField?
 
     init(editing: FoodItemRow? = nil, onSave: @escaping (FoodItemRow) -> Void) {
@@ -44,6 +45,7 @@ struct FoodItemEditorSheet: View {
         _proteinText = State(initialValue: editing?.proteinPer100g.map { Self.trimmed($0) } ?? "")
         _carbsText = State(initialValue: editing?.carbsPer100g.map { Self.trimmed($0) } ?? "")
         _fatText = State(initialValue: editing?.fatPer100g.map { Self.trimmed($0) } ?? "")
+        _servingSizeText = State(initialValue: editing?.servingSizeG.map { Self.trimmed($0) } ?? "")
         _barcode = State(initialValue: editing?.barcode)
     }
 
@@ -118,6 +120,12 @@ struct FoodItemEditorSheet: View {
                 HStack(spacing: 14) {
                     field("Carbs") { numberInput("optional", text: $carbsText, unit: "g", field: .carbs) }
                     field("Fat") { numberInput("optional", text: $fatText, unit: "g", field: .fat) }
+                }
+                // Grams per portion — usually carried straight over from Open Food Facts' own
+                // `serving_quantity` on a scan/search pick (see `apply(_:)`), so logging a meal can use
+                // "1 portion" instead of always needing a weighed gram amount.
+                field("Serving size (optional)") {
+                    numberInput("e.g. 30", text: $servingSizeText, unit: "g", field: .servingSize)
                 }
             }
             if let validationNote { noteRow(validationNote) }
@@ -205,6 +213,7 @@ struct FoodItemEditorSheet: View {
         if let v = product.proteinPer100g { proteinText = Self.trimmed(v) }
         if let v = product.carbsPer100g { carbsText = Self.trimmed(v) }
         if let v = product.fatPer100g { fatText = Self.trimmed(v) }
+        if let v = product.servingSizeG { servingSizeText = Self.trimmed(v) }
         barcode = product.barcode
         offResults = []
         offQuery = ""
@@ -292,14 +301,16 @@ struct FoodItemEditorSheet: View {
         guard case .some(let kcal) = parsed(kcalText),
               case .some(let protein) = parsed(proteinText),
               case .some(let carbs) = parsed(carbsText),
-              case .some(let fat) = parsed(fatText) else { return nil }
+              case .some(let fat) = parsed(fatText),
+              case .some(let servingSize) = parsed(servingSizeText) else { return nil }
         return FoodItemRow(
             id: editing?.id ?? UUID().uuidString,
             deviceId: WhoopStore.foodLogSourceId,
             name: trimmedName,
             kcalPer100g: kcal, proteinPer100g: protein, carbsPer100g: carbs, fatPer100g: fat,
             barcode: barcode,
-            createdAt: editing?.createdAt ?? Int(Date().timeIntervalSince1970)
+            createdAt: editing?.createdAt ?? Int(Date().timeIntervalSince1970),
+            servingSizeG: servingSize
         )
     }
 

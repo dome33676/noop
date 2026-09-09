@@ -993,6 +993,15 @@ extension WhoopStore {
                 t.add(column: "effortScale", .text)
             }
         }
+        // v47: grams-per-serving on a food-library item, usually seeded from Open Food Facts' own
+        // `serving_quantity` on a scan — lets the Food tab log "1 portion" instead of always requiring
+        // a weighed gram amount. Additive, nullable - an item with no known serving size (hand-entered,
+        // or scanned before OFF exposed one) keeps the existing grams-only entry.
+        migrator.registerMigration("v47-food-serving-size") { db in
+            try db.alter(table: "foodItem") { t in
+                t.add(column: "servingSizeG", .double)
+            }
+        }
         return migrator
     }
 }

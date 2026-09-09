@@ -87,7 +87,7 @@ struct LiquidTodayView: View {
     @State private var showMoreIndex = false
     #endif
     @State private var synthesisExpanded = false
-    @State private var showLiveSession = false
+    @State private var showLiveWorkout = false
     @State private var showStartPicker = false
     @State private var startedTraining: StartedTraining?
 
@@ -438,19 +438,23 @@ struct LiquidTodayView: View {
             MoreIndexView()
         }
         #endif
-        // Live Session (silent guardian, beta): the in-session screen owns the whole display — full
-        // screen on iOS (nothing should compete with the ring mid-workout), a sheet on macOS where
-        // fullScreenCover doesn't exist.
-        .liveSessionCover(isPresented: $showLiveSession)
-        // Start-workout fork in the road (#today-live-session-picker): "Start Workout" no longer
-        // jumps straight into a live BLE session — it offers this choice first, then forwards into
-        // the exact same LiveSessionView cover above or the same ActiveTrainingView flow the Training
-        // tab's own "Start Training" uses.
-        .sheet(isPresented: $showStartPicker) {
-            StartSessionPickerSheet(
-                onLiveSession: { showLiveSession = true },
-                onStartTraining: { template in startTraining(from: template, repo: repo, into: $startedTraining) }
-            )
+        // Live Workout: the in-exercise screen owns the whole display, matching the Workouts tab's own
+        // "Start Workout" presentation (WorkoutsView.swift) exactly — same sheet, same environment.
+        .sheet(isPresented: $showLiveWorkout) {
+            LiveWorkoutView(onClose: { showLiveWorkout = false })
+                .environmentObject(model.live)
+        }
+        // "Start Workout" opens the SAME sport-catalogue + "My Templates" browser the Workouts tab's
+        // own "Start Workout" button already presents — not a separate, narrower picker — so a sport
+        // choice here behaves identically to starting one from Workouts, and a template choice lands
+        // in the same ActiveTrainingView flow the Training tab uses.
+        .workoutSelectionCover(isPresented: $showStartPicker) {
+            StartWorkoutSheet(onStartTemplate: { template in
+                startTraining(from: template, repo: repo, into: $startedTraining)
+            }) { name in
+                model.startWorkout(sport: name)
+                showLiveWorkout = true
+            }
         }
         .activeTrainingCover(item: $startedTraining, repo: repo, model: model)
         #if os(macOS)
@@ -628,13 +632,14 @@ struct LiquidTodayView: View {
         }
     }
 
-    /// One-tap Live Session start (silent guardian, beta) — sits directly under the hero scores, the
-    /// Charge its band is gated on. Same translucent chrome as the hero card so it reads as part of the
-    /// sky scene, quiet by design.
+    /// One-tap Start Workout — sits directly under the hero scores, the Charge its band is gated on.
+    /// Same translucent chrome as the hero card so it reads as part of the sky scene, quiet by design.
+    /// Opens the same sport-catalogue + "My Templates" browser the Workouts tab's own "Start Workout"
+    /// button presents (WorkoutsView.swift).
     private var liveSessionStartRow: some View {
         Button { showStartPicker = true } label: {
             HStack(spacing: 10) {
-                Image(systemName: "shield.lefthalf.filled")
+                Image(systemName: "figure.run")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(StrandPalette.metricCyan)
                 // Theme-aware session-start chrome (#1160 parity): NoopPanelSurface + normal text
@@ -642,15 +647,6 @@ struct LiquidTodayView: View {
                 Text("Start Workout")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textPrimary)
-                Text("BETA")
-                    .font(StrandFont.overlineScaled(8.5)).tracking(1.2)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .padding(.horizontal, 8).padding(.vertical, 2.5)
-                    .background(Capsule().fill(StrandPalette.surfaceInset.opacity(0.72))
-                        .overlay(Capsule().strokeBorder(
-                            StrandPalette.hairline,
-                            lineWidth: NoopMetrics.hairlineWidth
-                        )))
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(StrandPalette.textTertiary)
@@ -660,7 +656,7 @@ struct LiquidTodayView: View {
             .background(NoopPanelSurface(cornerRadius: 18, surfaceOpacity: cardOpacity))
         }
         .buttonStyle(LiquidPressStyle())
-        .accessibilityLabel("Start a live session. Beta. Silent strap coaching against today's Charge.")
+        .accessibilityLabel("Start a workout. Pick a sport, or start a saved Training.")
     }
 
     private var heroCard: some View {
@@ -2803,21 +2799,6 @@ private extension View {
         if #available(iOS 16.4, *) { self.presentationCompactAdaptation(.popover) } else { self }
         #else
         self
-        #endif
-    }
-
-    /// Present the Live Session screen: fullScreenCover on iOS (the guardian owns the display mid-
-    /// workout), a plain sheet on macOS where fullScreenCover doesn't exist. The session view calls
-    /// `onClose` itself once the summary is dismissed.
-    @ViewBuilder func liveSessionCover(isPresented: Binding<Bool>) -> some View {
-        #if os(iOS)
-        self.fullScreenCover(isPresented: isPresented) {
-            LiveSessionView(onClose: { isPresented.wrappedValue = false })
-        }
-        #else
-        self.sheet(isPresented: isPresented) {
-            LiveSessionView(onClose: { isPresented.wrappedValue = false })
-        }
         #endif
     }
 }

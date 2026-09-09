@@ -5,9 +5,10 @@ import WhoopStore
 //
 // `startTraining(from:repo:into:)` + `StartedTraining` + `.activeTrainingCover(item:repo:model:)`
 // used to live as private members of `TrainingView` — the Training tab's only entry point into
-// `ActiveTrainingView`. Today and Liquid Today's "Start Training" choice (via `StartSessionPickerSheet`)
-// need the exact same session-creation + presentation logic, so this is hoisted out here rather than
-// copy-pasted three times. Behavior is unchanged from the original `TrainingView`-private version.
+// `ActiveTrainingView`. Today, Liquid Today, and the Workouts tab's "My Templates" section (all via
+// `StartWorkoutSheet`'s `onStartTemplate`) need the exact same session-creation + presentation
+// logic, so this is hoisted out here rather than copy-pasted. Behavior is unchanged from the
+// original `TrainingView`-private version.
 
 /// Bundles a just-started session with the template it was started from — set as ONE `@State`
 /// value rather than two separate ones, so the session and its template can never be observed out

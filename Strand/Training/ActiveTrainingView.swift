@@ -280,7 +280,24 @@ struct ExercisePickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
 
-    private var results: [ExerciseCatalog.Exercise] { ExerciseCatalog.matching(query) }
+    /// Custom exercises (remembered globally, see `CustomExerciseStore`) first, then the built-in
+    /// catalogue — both filtered by the SAME query, deduped case-insensitively so a custom entry that
+    /// happens to shadow a built-in one only shows once.
+    private var results: [String] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let custom = CustomExerciseStore.all()
+        let builtins = ExerciseCatalog.matching(query).map(\.name)
+            .filter { name in !custom.contains { $0.caseInsensitiveCompare(name) == .orderedSame } }
+        let filteredCustom = q.isEmpty ? custom : custom.filter { $0.range(of: q, options: .caseInsensitive) != nil }
+        return filteredCustom + builtins
+    }
+
+    /// Whether the typed query is already an exact match among `results` — if so, there's nothing new
+    /// to "use", the matching row above already picks it.
+    private var queryAlreadyExists: Bool {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        return results.contains { $0.caseInsensitiveCompare(q) == .orderedSame }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space5) {
@@ -295,9 +312,9 @@ struct ExercisePickerSheet: View {
                 .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             ScrollView {
                 VStack(spacing: 0) {
-                    ForEach(results) { exercise in
-                        Button { onPick(exercise.name); dismiss() } label: {
-                            Text(exercise.name)
+                    ForEach(results, id: \.self) { name in
+                        Button { onPick(name); dismiss() } label: {
+                            Text(name)
                                 .font(StrandFont.body)
                                 .foregroundStyle(StrandPalette.textPrimary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -306,9 +323,14 @@ struct ExercisePickerSheet: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    if !query.trimmingCharacters(in: .whitespaces).isEmpty,
-                       ExerciseCatalog.exercise(named: query) == nil {
-                        Button { onPick(query); dismiss() } label: {
+                    if !query.trimmingCharacters(in: .whitespaces).isEmpty, !queryAlreadyExists {
+                        // New custom exercise: remembered globally so it's a pickable suggestion for
+                        // every future template/backfill/live-add too, not just this one slot.
+                        Button {
+                            CustomExerciseStore.remember(query)
+                            onPick(query)
+                            dismiss()
+                        } label: {
                             Label("Use \"\(query)\"", systemImage: "plus")
                                 .font(StrandFont.body)
                                 .foregroundStyle(StrandPalette.accent)

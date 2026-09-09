@@ -31,6 +31,10 @@ public struct FoodItemRow: Equatable, Codable, Sendable {
     public var fatPer100g: Double?
     public var barcode: String?
     public var createdAt: Int   // epoch seconds
+    /// Grams per one serving/portion (v47) — usually seeded from Open Food Facts' `serving_quantity`
+    /// on a scan, so logging "1 portion" doesn't require weighing. nil for an item with no known
+    /// serving size, which just keeps the existing grams-only entry.
+    public var servingSizeG: Double?
 
     public init(
         id: String,
@@ -41,7 +45,8 @@ public struct FoodItemRow: Equatable, Codable, Sendable {
         carbsPer100g: Double?,
         fatPer100g: Double?,
         barcode: String?,
-        createdAt: Int
+        createdAt: Int,
+        servingSizeG: Double? = nil
     ) {
         self.id = id
         self.deviceId = deviceId
@@ -52,6 +57,7 @@ public struct FoodItemRow: Equatable, Codable, Sendable {
         self.fatPer100g = fatPer100g
         self.barcode = barcode
         self.createdAt = createdAt
+        self.servingSizeG = servingSizeG
     }
 
     static func decode(_ row: Row) -> FoodItemRow {
@@ -64,7 +70,8 @@ public struct FoodItemRow: Equatable, Codable, Sendable {
             carbsPer100g: row["carbsPer100g"],
             fatPer100g: row["fatPer100g"],
             barcode: row["barcode"],
-            createdAt: row["createdAt"]
+            createdAt: row["createdAt"],
+            servingSizeG: row["servingSizeG"]
         )
     }
 }
@@ -127,18 +134,19 @@ extension WhoopStore {
             try db.execute(sql: """
                 INSERT INTO foodItem
                     (id, deviceId, name, kcalPer100g, proteinPer100g, carbsPer100g, fatPer100g,
-                     barcode, createdAt)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     barcode, createdAt, servingSizeG)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     kcalPer100g = excluded.kcalPer100g,
                     proteinPer100g = excluded.proteinPer100g,
                     carbsPer100g = excluded.carbsPer100g,
                     fatPer100g = excluded.fatPer100g,
-                    barcode = excluded.barcode
+                    barcode = excluded.barcode,
+                    servingSizeG = excluded.servingSizeG
                 """, arguments: [
                     item.id, item.deviceId, item.name, item.kcalPer100g, item.proteinPer100g,
-                    item.carbsPer100g, item.fatPer100g, item.barcode, item.createdAt,
+                    item.carbsPer100g, item.fatPer100g, item.barcode, item.createdAt, item.servingSizeG,
                 ])
             return db.changesCount
         }

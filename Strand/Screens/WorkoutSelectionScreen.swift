@@ -1,5 +1,6 @@
 import SwiftUI
 import StrandDesign
+import WhoopStore
 
 // MARK: - Workout selection browser
 //
@@ -8,16 +9,24 @@ import StrandDesign
 // large destination cards with native Liquid Glass search.
 
 /// Public entry used by Live / Workouts. Keeps the prior `onStart` + optional title overrides so the
-/// merge-name prompt can reuse the same browser.
+/// merge-name prompt can reuse the same browser. `onStartTemplate` is a SEPARATE, optional callback
+/// for the "My Templates" section (nil/`showTemplates: false` for the merge-name reuse, which is
+/// naming an already-recorded session and has no business starting a NEW strength training) — kept
+/// distinct from `onStart` rather than overloading it, since a template and a sport name aren't the
+/// same kind of choice and the caller needs to route them to different places (`ActiveTrainingView`
+/// vs. `LiveWorkoutView`).
 struct StartWorkoutSheet: View {
     let onStart: (_ sport: String) -> Void
+    let onStartTemplate: ((_ template: StrengthTemplateRow?) -> Void)?
     private let heading: String
     private let explainer: String
     private let actionVerb: String
 
     init(title: String? = nil, subtitle: String? = nil, actionVerb: String? = nil,
+         onStartTemplate: ((_ template: StrengthTemplateRow?) -> Void)? = nil,
          onStart: @escaping (_ sport: String) -> Void) {
         self.onStart = onStart
+        self.onStartTemplate = onStartTemplate
         self.heading = title ?? String(localized: "Choose a workout")
         self.explainer = subtitle
             ?? String(localized: "Pick an activity to begin recording heart rate, effort, peak, and average.")
@@ -26,7 +35,7 @@ struct StartWorkoutSheet: View {
 
     var body: some View {
         WorkoutSelectionScreen(heading: heading, explainer: explainer, actionVerb: actionVerb,
-                               onStart: onStart)
+                               onStart: onStart, onStartTemplate: onStartTemplate)
     }
 }
 
@@ -37,10 +46,17 @@ struct WorkoutSelectionScreen: View {
     let explainer: String
     let actionVerb: String
     let onStart: (_ sport: String) -> Void
+    var onStartTemplate: ((_ template: StrengthTemplateRow?) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var repo: Repository
     @State private var query = ""
     @FocusState private var searchFocused: Bool
+    /// Own Training templates, offered alongside the sport catalogue so starting a strength
+    /// training here lands in the SAME `ActiveTrainingView` flow the Training tab uses — a sport
+    /// like "Strength"/"Bodybuilding" from the catalogue below only ever produces a live-tracked
+    /// `WorkoutRow`, with no connection to a saved template or its sets.
+    @State private var templates: [StrengthTemplateRow] = []
 
     private var trimmedQuery: String { query.trimmingCharacters(in: .whitespaces) }
     private var filtered: [WorkoutCatalog.Sport] { WorkoutCatalog.matching(query) }
@@ -48,6 +64,7 @@ struct WorkoutSelectionScreen: View {
         RecentSportsPrefs.recent().compactMap { WorkoutCatalog.sport(named: $0) }
     }
     private var showRecent: Bool { trimmedQuery.isEmpty && !recentSports.isEmpty }
+    private var showTemplates: Bool { onStartTemplate != nil && trimmedQuery.isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -56,6 +73,10 @@ struct WorkoutSelectionScreen: View {
                     headerCopy
                     WorkoutSearchField(query: $query, isFocused: $searchFocused)
                         .padding(.top, NoopMetrics.space1)
+
+                    if showTemplates {
+                        templatesSection
+                    }
 
                     if showRecent {
                         recentSection
@@ -83,6 +104,10 @@ struct WorkoutSelectionScreen: View {
             .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
             #endif
             .scrollDismissesKeyboard(.interactively)
+            .task {
+                guard onStartTemplate != nil else { return }
+                templates = await repo.strengthTemplates()
+            }
             .background {
                 StrandPalette.surfaceBase.ignoresSafeArea()
             }
@@ -119,6 +144,33 @@ struct WorkoutSelectionScreen: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
+    }
+
+    /// "My Templates" — a blank training plus every saved Training template, styled as its own
+    /// `WorkoutSelectionCard`-weight row so starting real strength training reads as a first-class
+    /// choice here, not a buried afterthought below the generic sport catalogue.
+    private var templatesSection: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+            Text("My Templates")
+                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                .foregroundStyle(StrandPalette.textSecondary)
+            LazyVStack(spacing: NoopMetrics.space4) {
+                TemplateSelectionCard(name: String(localized: "Blank Training"), actionVerb: actionVerb) {
+                    selectTemplate(nil)
+                }
+                ForEach(templates) { template in
+                    TemplateSelectionCard(name: template.name, actionVerb: actionVerb) {
+                        selectTemplate(template)
+                    }
+                }
+            }
+        }
+    }
+
+    private func selectTemplate(_ template: StrengthTemplateRow?) {
+        searchFocused = false
+        onStartTemplate?(template)
+        dismiss()
     }
 
     private var recentSection: some View {
@@ -259,6 +311,54 @@ struct WorkoutSelectionCard: View {
         let labels = meta.map(\.text)
         if labels.isEmpty { return "\(sport.name) workout" }
         return "\(sport.name) workout, \(labels.joined(separator: ", "))"
+    }
+}
+
+/// `WorkoutSelectionCard`'s twin for a Training template — same card chrome, no GPS/indoor-outdoor
+/// metadata (a template has none), a dumbbell glyph instead of a per-sport icon.
+struct TemplateSelectionCard: View {
+    let name: String
+    let actionVerb: String
+    let onSelect: () -> Void
+
+    private var accent: Color { StrandPalette.effortColor }
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(alignment: .center, spacing: NoopMetrics.space4) {
+                Image(systemName: "dumbbell.fill")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(accent)
+                    .frame(width: 52, height: 52)
+                    .background(accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                Text(name)
+                    .font(StrandFont.title2)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "play.fill")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(StrandPalette.goldDeepText)
+                    .frame(width: 52, height: 52)
+                    .background(Circle().fill(StrandPalette.accent))
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, NoopMetrics.space5)
+            .padding(.vertical, NoopMetrics.space5)
+            .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+            .background {
+                NoopPanelSurface(tint: accent, cornerRadius: 28, elevated: true)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        }
+        .buttonStyle(LiquidPressStyle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("\(name) training"))
+        .accessibilityHint(Text("Double tap to \(actionVerb.lowercased())"))
+        .accessibilityAddTraits(.isButton)
     }
 }
 

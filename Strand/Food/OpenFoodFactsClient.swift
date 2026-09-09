@@ -20,6 +20,9 @@ enum OpenFoodFactsClient {
         let proteinPer100g: Double?
         let carbsPer100g: Double?
         let fatPer100g: Double?
+        /// Grams per one serving, straight from OFF's own `serving_quantity` when the product declares
+        /// one — lets a scan carry the portion size over instead of the user having to weigh it.
+        let servingSizeG: Double?
     }
 
     struct SearchPage {
@@ -51,7 +54,7 @@ enum OpenFoodFactsClient {
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "page", value: String(page)),
             URLQueryItem(name: "page_size", value: String(pageSize)),
-            URLQueryItem(name: "fields", value: "product_name,code,nutriments"),
+            URLQueryItem(name: "fields", value: "product_name,code,nutriments,serving_quantity"),
         ]
         guard let url = components.url else { return SearchPage(products: [], hasMore: false) }
         do {
@@ -101,7 +104,16 @@ enum OpenFoodFactsClient {
             kcalPer100g: nutriments["energy-kcal_100g"] as? Double,
             proteinPer100g: nutriments["proteins_100g"] as? Double,
             carbsPer100g: nutriments["carbohydrates_100g"] as? Double,
-            fatPer100g: nutriments["fat_100g"] as? Double
+            fatPer100g: nutriments["fat_100g"] as? Double,
+            servingSizeG: servingQuantity(product["serving_quantity"])
         )
+    }
+
+    /// OFF's `serving_quantity` is documented as numeric grams, but community-edited products
+    /// sometimes carry it as a numeric string — tolerate both rather than dropping a usable value.
+    private static func servingQuantity(_ raw: Any?) -> Double? {
+        if let d = raw as? Double { return d > 0 ? d : nil }
+        if let s = raw as? String, let d = Double(s) { return d > 0 ? d : nil }
+        return nil
     }
 }

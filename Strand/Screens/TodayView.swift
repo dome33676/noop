@@ -406,7 +406,7 @@ struct TodayView: View {
     /// "More" moved off the iOS tab bar (freeing its slot for Training) and lives here instead, next
     /// to the strap-status area — iOS-only, macOS's sidebar already lists every destination directly.
     @State private var showMoreIndex = false
-    @State private var showLiveSession = false
+    @State private var showLiveWorkout = false
     @State private var showStartPicker = false
     @State private var startedTraining: StartedTraining?
     /// The Updates inbox sheet (opened by the header bell). Shared across both platforms.
@@ -1567,23 +1567,28 @@ struct TodayView: View {
             #endif
         }
         #if os(iOS)
-        .fullScreenCover(isPresented: $showLiveSession) {
-            LiveSessionView(onClose: { showLiveSession = false })
+        .sheet(isPresented: $showLiveWorkout) {
+            LiveWorkoutView(onClose: { showLiveWorkout = false })
+                .environmentObject(app.live)
         }
         #else
-        .sheet(isPresented: $showLiveSession) {
-            LiveSessionView(onClose: { showLiveSession = false })
+        .sheet(isPresented: $showLiveWorkout) {
+            LiveWorkoutView(onClose: { showLiveWorkout = false })
+                .environmentObject(app.live)
         }
         #endif
-        // Start-workout fork in the road (#today-live-session-picker): "Start Workout" no longer
-        // jumps straight into a live BLE session — it offers this choice first, then forwards into
-        // the exact same LiveSessionView cover above or the same ActiveTrainingView flow the Training
-        // tab's own "Start Training" uses.
-        .sheet(isPresented: $showStartPicker) {
-            StartSessionPickerSheet(
-                onLiveSession: { showLiveSession = true },
-                onStartTraining: { template in startTraining(from: template, repo: repo, into: $startedTraining) }
-            )
+        // "Start Workout" opens the SAME sport-catalogue + "My Templates" browser the Workouts tab's
+        // own "Start Workout" button already presents (WorkoutsView.swift) — not a separate, narrower
+        // picker — so a sport choice here behaves identically to starting one from Workouts (a live
+        // WorkoutRow via LiveWorkoutView), and a template choice lands in the same ActiveTrainingView
+        // flow the Training tab uses.
+        .workoutSelectionCover(isPresented: $showStartPicker) {
+            StartWorkoutSheet(onStartTemplate: { template in
+                startTraining(from: template, repo: repo, into: $startedTraining)
+            }) { name in
+                app.startWorkout(sport: name)
+                showLiveWorkout = true
+            }
         }
         .activeTrainingCover(item: $startedTraining, repo: repo, model: app)
         // Honour a "Restore to Today" tap from the inbox: flip the matching dismissed flag back so the
@@ -1968,7 +1973,7 @@ struct TodayView: View {
         Button { showStartPicker = true } label: {
             NoopCard(tint: StrandPalette.metricCyan) {
                 HStack(spacing: NoopMetrics.space3) {
-                    Image(systemName: "shield.lefthalf.filled")
+                    Image(systemName: "figure.run")
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.metricCyan)
                         .accessibilityHidden(true)
@@ -1976,13 +1981,11 @@ struct TodayView: View {
                         Text("Start Workout")
                             .font(StrandFont.headline)
                             .foregroundStyle(StrandPalette.textPrimary)
-                        Text("Silent strap coaching against today's Charge.")
+                        Text("Pick a sport, or start a saved Training.")
                             .font(StrandFont.caption)
                             .foregroundStyle(StrandPalette.textSecondary)
                     }
                     Spacer(minLength: NoopMetrics.space2)
-                    Text("BETA")
-                        .strandOverline()
                     Image(systemName: "chevron.right")
                         .font(StrandFont.caption.weight(.semibold))
                         .foregroundStyle(StrandPalette.textTertiary)
@@ -1991,7 +1994,7 @@ struct TodayView: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Start a live session. Beta. Silent strap coaching against today's Charge.")
+        .accessibilityLabel("Start a workout. Pick a sport, or start a saved Training.")
     }
 
     private var recoveryVitalsSection: some View {
