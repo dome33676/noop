@@ -35,6 +35,7 @@ struct LogMealSheet: View {
     @State private var quantityText: String
     @State private var mealType: FoodMealType
     @State private var showNewFoodSheet = false
+    @State private var showEditFoodSheet = false
     @State private var showScanner = false
     @State private var scanNotFound = false
 
@@ -169,6 +170,14 @@ struct LogMealSheet: View {
         }
         .sheet(isPresented: $showNewFoodSheet) {
             FoodItemEditorSheet { item in
+                Task { await repo.saveFoodItem(item); selectedFood = item }
+            }
+        }
+        // Edits the CURRENTLY selected food (macros, serving size, custom portions) — the only way
+        // to add a portion preset to an item that already exists in the library, since new items
+        // only ever go through the "Enter by hand"/scan paths above.
+        .sheet(isPresented: $showEditFoodSheet) {
+            FoodItemEditorSheet(editing: selectedFood) { item in
                 Task { await repo.saveFoodItem(item); selectedFood = item }
             }
         }
@@ -413,6 +422,8 @@ struct LogMealSheet: View {
                 .font(StrandFont.body)
                 .foregroundStyle(StrandPalette.textPrimary)
             Spacer(minLength: 8)
+            Button("Edit") { showEditFoodSheet = true }
+                .font(StrandFont.footnote)
             Button("Change") { selectedFood = nil }
                 .font(StrandFont.footnote)
         }
