@@ -10,6 +10,15 @@ do not merge entries between the two.
 
 ---
 
+## `5cf113c2` — Fix macOS sed incompatibility in the post-commit changelog hook (2026-09-10)
+
+'sed "1{/^\$/d}"' errors on BSD sed (macOS default) without a trailing
+semicolon before the closing brace, which silently emptied the very first
+auto-generated changelog entry. Fixed the hook and corrected that entry by
+hand.
+
+---
+
 ## `f06c670e` — Add FORK_CHANGELOG.md and a post-commit hook that keeps it in sync (2026-09-10)
 
 Technical, AI-readable changelog of this fork's own work on top of upstream
