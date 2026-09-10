@@ -2007,6 +2007,9 @@ struct TodayView: View {
     /// TodayView already computes for the "Your Cards" stress row (StressModel, StressView-identical),
     /// rendered as a small live vessel that pushes to the full `StressView()` on tap. No new state, no
     /// new repo reads — mirrors `recoveryVitalsSection`'s idiom.
+    /// Matches the Key Metrics tiles' own visual language (`StatTile`, label + value + sparkline trend
+    /// + caption) rather than a bespoke vessel — this is "the current stress score with its recent
+    /// trend line", the same shape every other Today tile already uses, not a 0–100 liquid gauge.
     private var stressMonitorSection: some View {
         let band = stressToday.map { StressBand(score: $0) }
         let tint = stressToday.map { StressRamp.color($0) } ?? StressRamp.calm
@@ -2014,22 +2017,16 @@ struct TodayView: View {
             SectionHeader("Stress Monitor", overline: "Autonomic load",
                           trailing: band?.title ?? String(localized: "Live"))
             NavigationLink(value: TabRoute.stress) {
-                NoopCard(tint: tint) {
-                    HStack(spacing: NoopMetrics.space5) {
-                        LiquidVessel(value: min(1, max(0, (stressToday ?? 0) / 3)), tint: tint, animated: true)
-                            .frame(width: 64, height: 64)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(dashboardValue(.stress))
-                                .font(StrandFont.number(28)).foregroundStyle(StrandPalette.textPrimary)
-                            Text(band?.title ?? String(localized: "Calibrating"))
-                                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                                .foregroundStyle(tint)
-                        }
-                        Spacer(minLength: 8)
-                        Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                }
+                // One decimal, not `dashboardValue(.stress)`'s rounded integer (sized for the compact
+                // "Your Cards" pinned row) — this tile has the room to show the score's real precision.
+                StatTile(
+                    label: "Stress",
+                    value: stressToday.map { String(format: "%.1f", $0) } ?? Self.calibratingPlaceholder,
+                    caption: band.map { String(localized: "of 3 · \($0.title)") } ?? String(localized: "Calibrating"),
+                    accent: tint,
+                    sparkline: sparks["stress"],
+                    sparkColor: tint
+                )
             }
             .buttonStyle(.plain)
             .accessibilityHint("Opens the Stress Monitor")
@@ -4473,8 +4470,12 @@ struct TodayView: View {
         async let stepsAppleSpark    = sparkValues("steps", source: "apple-health", window: 14)
         async let weightSpark        = sparkValues("weight", source: "apple-health", window: 90)
         async let activeKcalSpark    = sparkValues("active_kcal", source: "apple-health", window: 14)
+        // Stress Monitor's Today card trend — via `exploreSeries` for the same reason as
+        // resp_rate/skin_temp above, so a BLE-only strap's own computed score still backs the sparkline.
+        async let stressSpark        = sparkValuesExplore("stress", source: "my-whoop", window: 14)
 
         sparks["recovery"]        = await recoverySpark
+        sparks["stress"]          = await stressSpark
         sparks["strain"]          = await strainSpark
         sparks["sleep_total_min"] = await sleepTotalSpark
         sparks["hrv"]             = await hrvSpark

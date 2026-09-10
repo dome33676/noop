@@ -60,9 +60,12 @@ struct LogMealSheet: View {
     @State private var savingProduct: OpenFoodFactsClient.Product?
 
     private enum NumberField: Hashable { case quantity }
-    /// Which unit the Quantity field's number is in — only offered (and only meaningful) for a food
-    /// with a known `servingSizeG`; `quantityGrams` converts back to grams for storage either way.
-    private enum QuantityUnit: CaseIterable, Hashable { case grams, portions }
+    /// Which unit the Quantity field's number is in: plain grams, the OFF-scanned default serving
+    /// (`.defaultServing`), or one of the food's user-defined `FoodPortion` presets (`.custom(label)`,
+    /// looked up by label so a stale selection from a previously-selected food just falls back to
+    /// grams rather than reusing a wrong conversion factor). `quantityGrams` converts back to grams
+    /// for storage regardless of which unit is active.
+    private enum QuantityUnit: Hashable { case grams, defaultServing, custom(String) }
     @State private var quantityUnit: QuantityUnit = .grams
     @FocusState private var focusedField: NumberField?
 
@@ -124,14 +127,15 @@ struct LogMealSheet: View {
                 selectedFoodRow(selectedFood)
                 field("Quantity") {
                     VStack(alignment: .leading, spacing: 8) {
-                        // Only offered when the item has a known serving size (usually carried over
-                        // from an Open Food Facts scan, see FoodItemEditorSheet's `apply(_:)`) — so
-                        // logging can use "1 portion" instead of always requiring a weighed gram amount.
-                        if let serving = selectedFood.servingSizeG, serving > 0 {
-                            SegmentedPillControl(QuantityUnit.allCases, selection: Binding(
+                        // Only offered when the item has a known serving size and/or custom portion
+                        // presets (see FoodItemEditorSheet) — so logging can use "1 portion" or "1
+                        // Meine Portion" instead of always requiring a weighed gram amount.
+                        let units = quantityUnits(for: selectedFood)
+                        if units.count > 1 {
+                            SegmentedPillControl(units, selection: Binding(
                                 get: { quantityUnit },
-                                set: { setQuantityUnit($0, servingSizeG: serving) }
-                            )) { $0 == .grams ? "Grams" : "Portions" }
+                                set: { setQuantityUnit($0) }
+                            ), adaptsToAvailableWidth: true) { quantityUnitLabel($0) }
                         }
                         HStack(spacing: 6) {
                             TextField(quantityUnit == .grams ? "100" : "1", text: $quantityText)
@@ -140,7 +144,7 @@ struct LogMealSheet: View {
                                 .foregroundStyle(StrandPalette.textPrimary)
                                 .numericKeyboard()
                                 .focused($focusedField, equals: .quantity)
-                            Text(quantityUnit == .grams ? "g" : "portion(s)")
+                            Text(quantityUnit == .grams ? "g" : "×")
                                 .font(StrandFont.footnote)
                                 .foregroundStyle(StrandPalette.textTertiary)
                         }
@@ -565,23 +569,56 @@ struct LogMealSheet: View {
 
     private var inputShape: RoundedRectangle { RoundedRectangle(cornerRadius: 10, style: .continuous) }
 
+    /// The units offered for a food: grams always, plus its OFF-scanned default serving (if any) and
+    /// each user-defined `FoodPortion` preset, in that order.
+    private func quantityUnits(for food: FoodItemRow) -> [QuantityUnit] {
+        var units: [QuantityUnit] = [.grams]
+        if let serving = food.servingSizeG, serving > 0 { units.append(.defaultServing) }
+        units.append(contentsOf: food.customPortions.filter { $0.grams > 0 }.map { .custom($0.label) })
+        return units
+    }
+
+    private func quantityUnitLabel(_ unit: QuantityUnit) -> String {
+        switch unit {
+        case .grams: String(localized: "Grams")
+        case .defaultServing: String(localized: "Portion")
+        case .custom(let label): label
+        }
+    }
+
+    /// Grams-per-unit for a non-`.grams` unit, resolved against `food` fresh each time (rather than
+    /// carried in the enum case) so a unit selection left over from a previously-selected food just
+    /// fails to resolve — falling back to grams in `quantityGrams` — instead of reusing a stale factor.
+    private func gramsPerUnit(_ unit: QuantityUnit, food: FoodItemRow) -> Double? {
+        switch unit {
+        case .grams: nil
+        case .defaultServing: food.servingSizeG
+        case .custom(let label): food.customPortions.first { $0.label == label }?.grams
+        }
+    }
+
     private var quantityGrams: Double? {
         // German-locale comma decimal, mirrors JournalLogCard's NumericLogField.
         let t = quantityText.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
         guard let v = Double(t), v > 0 else { return nil }
-        guard quantityUnit == .portions, let serving = selectedFood?.servingSizeG, serving > 0 else { return v }
-        return v * serving
+        guard quantityUnit != .grams, let food = selectedFood,
+              let perUnit = gramsPerUnit(quantityUnit, food: food), perUnit > 0 else { return v }
+        return v * perUnit
     }
 
     /// Switches the quantity field's unit, converting the DISPLAYED number so the actual gram amount
     /// stays the same across the switch — reads the current gram equivalent under the OLD unit before
     /// flipping `quantityUnit`, since `quantityGrams` itself depends on that state.
-    private func setQuantityUnit(_ new: QuantityUnit, servingSizeG: Double) {
+    private func setQuantityUnit(_ new: QuantityUnit) {
         guard new != quantityUnit else { return }
         let currentGrams = quantityGrams
         quantityUnit = new
         guard let currentGrams else { return }
-        quantityText = new == .grams ? Self.trimmed(currentGrams) : Self.trimmed(currentGrams / servingSizeG)
+        if new == .grams {
+            quantityText = Self.trimmed(currentGrams)
+        } else if let food = selectedFood, let perUnit = gramsPerUnit(new, food: food), perUnit > 0 {
+            quantityText = Self.trimmed(currentGrams / perUnit)
+        }
     }
 
     private var builtEntry: MealEntryRow? {

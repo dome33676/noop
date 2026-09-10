@@ -24,6 +24,12 @@ struct FoodItemEditorSheet: View {
     @State private var fatText: String
     @State private var servingSizeText: String
     @State private var barcode: String?
+    /// User-defined portion presets — ADDITIVE to `servingSizeText` above (the OFF-scanned default),
+    /// so "I always eat 250g of this, not whatever OFF says" gets its own preset instead of
+    /// overwriting the scanned one.
+    @State private var customPortions: [FoodPortion]
+    @State private var newPortionLabel = ""
+    @State private var newPortionGramsText = ""
 
     @State private var offQuery = ""
     @State private var offResults: [OpenFoodFactsClient.Product] = []
@@ -34,7 +40,7 @@ struct FoodItemEditorSheet: View {
     @State private var scanNotFound = false
     #endif
 
-    private enum NumberField: Hashable { case kcal, protein, carbs, fat, servingSize }
+    private enum NumberField: Hashable { case kcal, protein, carbs, fat, servingSize, newPortionGrams }
     @FocusState private var focusedField: NumberField?
 
     init(editing: FoodItemRow? = nil, onSave: @escaping (FoodItemRow) -> Void) {
@@ -47,6 +53,7 @@ struct FoodItemEditorSheet: View {
         _fatText = State(initialValue: editing?.fatPer100g.map { Self.trimmed($0) } ?? "")
         _servingSizeText = State(initialValue: editing?.servingSizeG.map { Self.trimmed($0) } ?? "")
         _barcode = State(initialValue: editing?.barcode)
+        _customPortions = State(initialValue: editing?.customPortions ?? [])
     }
 
     private static func trimmed(_ v: Double) -> String {
@@ -127,6 +134,7 @@ struct FoodItemEditorSheet: View {
                 field("Serving size (optional)") {
                     numberInput("e.g. 30", text: $servingSizeText, unit: "g", field: .servingSize)
                 }
+                myPortionsSection
             }
             if let validationNote { noteRow(validationNote) }
             footer
@@ -217,6 +225,80 @@ struct FoodItemEditorSheet: View {
         barcode = product.barcode
         offResults = []
         offQuery = ""
+    }
+
+    // MARK: - My portions (custom presets, additive to the scanned serving size above)
+
+    private var myPortionsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("My portions").strandOverline()
+            Text("Your own presets, e.g. \"250g\" — in addition to the serving size above, not instead of it.")
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !customPortions.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(customPortions.enumerated()), id: \.element.id) { idx, portion in
+                        HStack {
+                            Text(portion.label)
+                                .font(StrandFont.body)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Spacer(minLength: 8)
+                            Text("\(Self.trimmed(portion.grams)) g")
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                            Button {
+                                customPortions.removeAll { $0.id == portion.id }
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(StrandPalette.textTertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove \(portion.label)")
+                        }
+                        .padding(.vertical, 6)
+                        if idx < customPortions.count - 1 { Divider().opacity(0.3) }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .background(StrandPalette.surfaceInset, in: inputShape)
+                .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+            }
+            HStack(spacing: 6) {
+                TextField("e.g. Meine Portion", text: $newPortionLabel)
+                    .textFieldStyle(.plain)
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .padding(.horizontal, 12).padding(.vertical, 9)
+                    .background(StrandPalette.surfaceInset, in: inputShape)
+                    .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                numberInput("g", text: $newPortionGramsText, unit: "g", field: .newPortionGrams)
+                    .frame(maxWidth: 100)
+                Button(action: addPortion) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(newPortionIsValid ? StrandPalette.accent : StrandPalette.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .disabled(!newPortionIsValid)
+                .accessibilityLabel("Add portion")
+            }
+        }
+    }
+
+    private var newPortionIsValid: Bool {
+        let label = newPortionLabel.trimmingCharacters(in: .whitespaces)
+        guard !label.isEmpty, case .some(let grams) = parsed(newPortionGramsText), let grams, grams > 0 else { return false }
+        return !customPortions.contains { $0.label.caseInsensitiveCompare(label) == .orderedSame }
+    }
+
+    private func addPortion() {
+        guard newPortionIsValid,
+              case .some(let grams) = parsed(newPortionGramsText), let grams else { return }
+        customPortions.append(FoodPortion(label: newPortionLabel.trimmingCharacters(in: .whitespaces), grams: grams))
+        newPortionLabel = ""
+        newPortionGramsText = ""
     }
 
     // MARK: - Sections
@@ -310,7 +392,8 @@ struct FoodItemEditorSheet: View {
             kcalPer100g: kcal, proteinPer100g: protein, carbsPer100g: carbs, fatPer100g: fat,
             barcode: barcode,
             createdAt: editing?.createdAt ?? Int(Date().timeIntervalSince1970),
-            servingSizeG: servingSize
+            servingSizeG: servingSize,
+            customPortionsJSON: FoodItemRow.encodePortions(customPortions)
         )
     }
 

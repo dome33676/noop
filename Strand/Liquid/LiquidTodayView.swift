@@ -722,27 +722,38 @@ struct LiquidTodayView: View {
     /// Today already computes for the "Your Cards" stress row (StressModel, StressView-identical),
     /// rendered as a small live vessel that pushes to the full `StressView()` on tap. No new state, no
     /// new repo reads — mirrors `heartRateSection`'s idiom.
+    /// Matches the Key Metrics tiles' own visual language (overline label + big value + sparkline
+    /// trend + caption, via `StrandDesign.Sparkline`) rather than a liquid vessel — this is "the
+    /// current stress score with its recent trend line", the same shape every detailed Key Metric
+    /// tile already uses, not a 0–100 fill gauge.
     private var stressMonitorSection: some View {
         let band = stress.map { StressBand(score: $0) }
         let tint = stress.map { StressRamp.color($0) } ?? StressRamp.calm
+        let spark = windowedSpark("stress")
         return VStack(spacing: 8) {
             sectionHead("STRESS MONITOR", trailing: band?.title ?? String(localized: "Live"))
             NavigationLink(value: TabRoute.stress) {
                 card {
-                    HStack(spacing: NoopMetrics.space5) {
-                        LiquidVessel(value: fracOver(stress, 3), tint: tint, animated: dataLoaded)
-                            .frame(width: 60, height: 60)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(stressText).font(StrandFont.number(26)).foregroundStyle(StrandPalette.textPrimary)
-                            Text(band?.title ?? String(localized: "Calibrating"))
-                                .font(StrandFont.overlineScaled(11)).tracking(1.0)
-                                .foregroundStyle(tint)
-                            Text("Autonomic load, HRV & resting HR")
-                                .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("STRESS")
+                            .font(StrandFont.overlineScaled(11)).tracking(1.0)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                        Spacer(minLength: 4)
+                        // One decimal (not `stressText`'s rounded integer, sized for the smaller pinned
+                        // card elsewhere) — this card has the room to show the real precision, matching
+                        // the 0-3 score's actual resolution.
+                        Text(stress.map { String(format: "%.1f", $0) } ?? String(localized: "Calibrating"))
+                            .font(StrandFont.number(28)).foregroundStyle(StrandPalette.textPrimary)
+                        #if !os(watchOS)
+                        if spark.count > 1 {
+                            Sparkline(values: spark, gradient: Gradient(colors: [tint.opacity(0.5), tint]))
+                                .frame(height: 22).padding(.top, 4)
+                                .accessibilityHidden(true)
                         }
-                        Spacer(minLength: 8)
-                        Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(StrandPalette.textTertiary)
+                        #endif
+                        Text(band.map { String(localized: "of 3 · \($0.title)") } ?? String(localized: "Calibrating"))
+                            .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                            .padding(.top, 2)
                     }
                 }
             }
@@ -1680,6 +1691,10 @@ struct LiquidTodayView: View {
             "steps_est": stepsSeries.filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey }
                 .map { ($0.day, $0.value) },
             "sleep_performance": restSeries.filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey }
+                .map { ($0.day, $0.value) },
+            // Stress Monitor's Today card trend — reuses `storedStress` (already fetched above to
+            // compute today's score), just windowed the same way as every other entry here.
+            "stress": storedStress.filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey }
                 .map { ($0.day, $0.value) },
         ]
         stress = await Task.detached(priority: .utility) {

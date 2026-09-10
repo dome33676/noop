@@ -1002,6 +1002,14 @@ extension WhoopStore {
                 t.add(column: "servingSizeG", .double)
             }
         }
+        // v48: user-defined portion presets (JSON array), additive to v47's single scanned
+        // `servingSizeG` — lets someone who always eats e.g. 250g of a food (not whatever OFF's
+        // default serving happened to be) save their own preset instead of typing grams every time.
+        migrator.registerMigration("v48-food-custom-portions") { db in
+            try db.alter(table: "foodItem") { t in
+                t.add(column: "customPortionsJSON", .text)
+            }
+        }
         return migrator
     }
 }

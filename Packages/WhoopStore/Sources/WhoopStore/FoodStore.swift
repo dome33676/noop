@@ -35,6 +35,11 @@ public struct FoodItemRow: Equatable, Codable, Sendable {
     /// on a scan, so logging "1 portion" doesn't require weighing. nil for an item with no known
     /// serving size, which just keeps the existing grams-only entry.
     public var servingSizeG: Double?
+    /// User-defined portion presets (v48), JSON-encoded — see `FoodPortion` (app layer, Strand/Food/).
+    /// ADDITIVE to `servingSizeG`: the scanned default stays as-is, this is where a user's OWN "I
+    /// always eat 250g of this" preset lives, so it survives even if `servingSizeG` gets overwritten
+    /// by a later re-scan. nil/empty for an item with no custom presets.
+    public var customPortionsJSON: String?
 
     public init(
         id: String,
@@ -46,7 +51,8 @@ public struct FoodItemRow: Equatable, Codable, Sendable {
         fatPer100g: Double?,
         barcode: String?,
         createdAt: Int,
-        servingSizeG: Double? = nil
+        servingSizeG: Double? = nil,
+        customPortionsJSON: String? = nil
     ) {
         self.id = id
         self.deviceId = deviceId
@@ -58,6 +64,7 @@ public struct FoodItemRow: Equatable, Codable, Sendable {
         self.barcode = barcode
         self.createdAt = createdAt
         self.servingSizeG = servingSizeG
+        self.customPortionsJSON = customPortionsJSON
     }
 
     static func decode(_ row: Row) -> FoodItemRow {
@@ -71,7 +78,8 @@ public struct FoodItemRow: Equatable, Codable, Sendable {
             fatPer100g: row["fatPer100g"],
             barcode: row["barcode"],
             createdAt: row["createdAt"],
-            servingSizeG: row["servingSizeG"]
+            servingSizeG: row["servingSizeG"],
+            customPortionsJSON: row["customPortionsJSON"]
         )
     }
 }
@@ -134,8 +142,8 @@ extension WhoopStore {
             try db.execute(sql: """
                 INSERT INTO foodItem
                     (id, deviceId, name, kcalPer100g, proteinPer100g, carbsPer100g, fatPer100g,
-                     barcode, createdAt, servingSizeG)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     barcode, createdAt, servingSizeG, customPortionsJSON)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     kcalPer100g = excluded.kcalPer100g,
@@ -143,10 +151,12 @@ extension WhoopStore {
                     carbsPer100g = excluded.carbsPer100g,
                     fatPer100g = excluded.fatPer100g,
                     barcode = excluded.barcode,
-                    servingSizeG = excluded.servingSizeG
+                    servingSizeG = excluded.servingSizeG,
+                    customPortionsJSON = excluded.customPortionsJSON
                 """, arguments: [
                     item.id, item.deviceId, item.name, item.kcalPer100g, item.proteinPer100g,
                     item.carbsPer100g, item.fatPer100g, item.barcode, item.createdAt, item.servingSizeG,
+                    item.customPortionsJSON,
                 ])
             return db.changesCount
         }
