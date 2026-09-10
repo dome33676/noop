@@ -52,4 +52,13 @@ enum ProgressionCalculator {
         }
         return ProgressionSuggestion(suggestedWeightKg: lastWeight, reasoning: "Repeat last session's weight.")
     }
+
+    /// The most recent past session's sets for one exercise, sorted by set index — unlike `suggest`
+    /// (which drops warm-ups and only projects a single working-set weight), this returns every set
+    /// as actually logged, reps included. Used to show/prefill "what I did last time" per set
+    /// position when building a template. Empty if `sets` has no history.
+    static func lastSessionSets(from sets: [StrengthSetRow]) -> [StrengthSetRow] {
+        guard let lastId = sets.max(by: { $0.completedAt < $1.completedAt })?.sessionId else { return [] }
+        return sets.filter { $0.sessionId == lastId }.sorted { $0.setIndex < $1.setIndex }
+    }
 }

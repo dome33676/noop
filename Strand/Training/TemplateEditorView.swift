@@ -13,11 +13,16 @@ struct TemplateEditorView: View {
     let editing: StrengthTemplateRow?
     let onSave: (StrengthTemplateRow) -> Void
 
+    @EnvironmentObject private var repo: Repository
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var plan: [TemplateExercisePlan]
     @State private var restTargetSeconds: Int
     @State private var showAddExercise = false
+    /// Per-exercise "last time" sets (most recent past session, any template), keyed by exercise
+    /// name — loaded for every exercise already in `plan` on appear, and for a freshly-added one, so
+    /// the user never has to recall their own last weights/reps when building a template.
+    @State private var lastSets: [String: [StrengthSetRow]] = [:]
 
     init(editing: StrengthTemplateRow? = nil, onSave: @escaping (StrengthTemplateRow) -> Void) {
         self.editing = editing
@@ -60,12 +65,32 @@ struct TemplateEditorView: View {
                 .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || plan.isEmpty)
             }
         }
+        .task {
+            for exerciseName in plan.map(\.exerciseName) { await loadLastSets(for: exerciseName) }
+        }
         .sheet(isPresented: $showAddExercise) {
             ExercisePickerSheet { name in
                 guard !plan.contains(where: { $0.exerciseName == name }) else { return }
-                plan.append(TemplateExercisePlan(exerciseName: name, sets: [TemplateSetPlan(targetReps: nil, targetWeightKg: nil)]))
+                Task {
+                    await loadLastSets(for: name)
+                    let last = lastSets[name] ?? []
+                    let seededSets = last.isEmpty
+                        ? [TemplateSetPlan(targetReps: nil, targetWeightKg: nil)]
+                        : last.map { TemplateSetPlan(targetReps: $0.reps, targetWeightKg: $0.weightKg) }
+                    plan.append(TemplateExercisePlan(exerciseName: name, sets: seededSets))
+                }
             }
         }
+    }
+
+    /// Fetches the exercise's most recent past session (any template, any session) and caches it in
+    /// `lastSets`, so both the "Last time" caption and a freshly-added exercise's prefilled sets can
+    /// read it. Exercise identity is a plain name string (same space `Repository.strengthSets`,
+    /// `CustomExerciseStore`, and `ProgressionCalculator` already use), so this works identically
+    /// whether the exercise was last logged from a different template or none at all.
+    private func loadLastSets(for exerciseName: String) async {
+        let history = await repo.strengthSets(exerciseName: exerciseName)
+        lastSets[exerciseName] = ProgressionCalculator.lastSessionSets(from: history)
     }
 
     private func exerciseCard(_ exercisePlan: Binding<TemplateExercisePlan>) -> some View {
@@ -83,6 +108,11 @@ struct TemplateEditorView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                if let hint = lastTimeHint(for: exercisePlan.wrappedValue.exerciseName) {
+                    Text(hint)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
                 ForEach(exercisePlan.wrappedValue.sets.indices, id: \.self) { setIdx in
                     setRow(exercisePlan, setIndex: setIdx)
                 }
@@ -98,6 +128,19 @@ struct TemplateEditorView: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+
+    /// "Last time: 10 reps @ 60 kg, 8 reps @ 60 kg" — the exercise's most recent logged session,
+    /// set by set, so the fields above are never a total guess even after the user edits them away
+    /// from the prefilled values. nil while history hasn't loaded yet, or there is none.
+    private func lastTimeHint(for exerciseName: String) -> String? {
+        guard let sets = lastSets[exerciseName], !sets.isEmpty else { return nil }
+        let parts = sets.map { set -> String in
+            let reps = set.reps.map { "\($0)" } ?? "?"
+            guard let weight = set.weightKg else { return "\(reps) reps" }
+            return "\(reps) reps @ \(String(format: "%.1f", weight)) kg"
+        }
+        return "Last time: \(parts.joined(separator: ", "))"
     }
 
     private func setRow(_ exercisePlan: Binding<TemplateExercisePlan>, setIndex: Int) -> some View {
