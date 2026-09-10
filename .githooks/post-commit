@@ -1,0 +1,66 @@
+#!/bin/sh
+# Auto-changelog: after every commit, append an entry (hash, subject, body) to
+# FORK_CHANGELOG.md and push. Keeps that file in sync with actual history without a manual
+# "please update the changelog" step at the end of every change.
+#
+# One-time setup per clone (hooksPath isn't picked up automatically by `git clone`):
+#   git config core.hooksPath .githooks
+#
+# Safe by design:
+# - Recursion guard: skips commits whose subject already starts with the changelog marker,
+#   so the changelog-update commit this hook makes doesn't trigger itself again.
+# - Never fails the commit that triggered it: a hook's own exit status doesn't undo a commit
+#   that already happened, but this still degrades to a warning instead of a hard stop so a
+#   broken changelog file or offline push doesn't look like commit failure.
+
+MARKER="chore(changelog):"
+SUBJECT=$(git log -1 --format=%s)
+
+case "$SUBJECT" in
+    "$MARKER"*) exit 0 ;;
+esac
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+CHANGELOG="$REPO_ROOT/FORK_CHANGELOG.md"
+
+if [ ! -f "$CHANGELOG" ]; then
+    echo "post-commit: FORK_CHANGELOG.md not found, skipping auto-changelog entry" >&2
+    exit 0
+fi
+
+HASH=$(git rev-parse --short HEAD)
+DATE=$(git log -1 --format=%ad --date=short)
+BODY=$(git log -1 --format=%B HEAD | tail -n +2 | sed '1{/^$/d}' | sed '/^Co-Authored-By:/d')
+
+SPLIT_AT=$(grep -n '^---$' "$CHANGELOG" | head -1 | cut -d: -f1)
+
+TMP="$CHANGELOG.tmp"
+if [ -n "$SPLIT_AT" ]; then
+    head -n "$SPLIT_AT" "$CHANGELOG" > "$TMP"
+else
+    cp "$CHANGELOG" "$TMP"
+fi
+{
+    echo ""
+    echo "## \`$HASH\` — $SUBJECT ($DATE)"
+    echo ""
+    echo "$BODY"
+    echo ""
+    echo "---"
+} >> "$TMP"
+if [ -n "$SPLIT_AT" ]; then
+    tail -n +$((SPLIT_AT + 1)) "$CHANGELOG" >> "$TMP"
+fi
+mv "$TMP" "$CHANGELOG"
+
+cd "$REPO_ROOT" || exit 0
+git add FORK_CHANGELOG.md
+git commit -m "$MARKER $SUBJECT
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>" --quiet
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if ! git push origin "$BRANCH" --quiet 2>/tmp/post-commit-push-error.log; then
+    echo "post-commit: push failed, changelog commit is local-only for now:" >&2
+    cat /tmp/post-commit-push-error.log >&2
+fi
