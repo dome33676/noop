@@ -30,7 +30,7 @@ fi
 
 HASH=$(git rev-parse --short HEAD)
 DATE=$(git log -1 --format=%ad --date=short)
-BODY=$(git log -1 --format=%B HEAD | tail -n +2 | sed '1{/^$/d}' | sed '/^Co-Authored-By:/d')
+BODY=$(git log -1 --format=%B HEAD | tail -n +2 | sed '1{/^$/d;}' | sed '/^Co-Authored-By:/d')
 
 SPLIT_AT=$(grep -n '^---$' "$CHANGELOG" | head -1 | cut -d: -f1)
 

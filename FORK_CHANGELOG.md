@@ -12,7 +12,11 @@ do not merge entries between the two.
 
 ## `f06c670e` — Add FORK_CHANGELOG.md and a post-commit hook that keeps it in sync (2026-09-10)
 
-
+Technical, AI-readable changelog of this fork's own work on top of upstream
+NOOP (upstream's own CHANGELOG.md is separate release notes, left untouched).
+.githooks/post-commit appends every subsequent commit's hash/subject/body to
+it and pushes automatically, so the changelog never drifts from what's
+actually on main without a manual step.
 
 ---
 
