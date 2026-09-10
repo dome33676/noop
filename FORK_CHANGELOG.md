@@ -10,6 +10,12 @@ do not merge entries between the two.
 
 ---
 
+## `f06c670e` — Add FORK_CHANGELOG.md and a post-commit hook that keeps it in sync (2026-09-10)
+
+
+
+---
+
 ## `befa309d` — Suggest last-used weight/reps when adding exercises to a template
 
 **Files:** `Strand/Training/ProgressionSuggestion.swift`, `Strand/Training/TemplateEditorView.swift`
