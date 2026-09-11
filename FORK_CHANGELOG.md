@@ -10,6 +10,56 @@ do not merge entries between the two.
 
 ---
 
+## `06262512` — Stress Monitor: live per-minute score + scrubbable intraday chart; Energy Balance detail view; Monster Finder offer-date filtering + PLZ; fix WHOOP double-tap ending sets early (2026-09-11)
+
+Stress Monitor (root cause): the pinned Today/LiquidToday card and the
+dedicated Stress screen's hero gauge were all reading StressModel, which is
+built exclusively from last NIGHT's sleep-derived resting-HR/HRV — it could
+never move within the day, so yesterday's workout never showed up. Added
+IntradayStress (StrandAnalytics), a per-minute rolling read (5-min trailing
+window, 60s step) over today's already-banked HR/R-R/gravity, sharing
+DaytimeStress's calm-hour reference and motion gate so an hour point and a
+minute point stay on the same 0-3 scale. The pinned card and the Stress
+screen's hero now prefer this live minute when one exists, falling back to
+the nightly score otherwise (an honest "no live reading yet", never
+invented). Added a new scrubbable per-minute line chart
+(StressIntradayChart, feature-scoped, not the shared OverviewHRChart) with
+a day-stepper and a "Whole day" vs. "Typical <weekday>" band comparison.
+No migration needed — everything derives from already-stored samples.
+
+Energy Balance: "burned today" was static because FoodView's load task
+keyed only on the day offset, never on repo.refreshSeq, so a background
+Apple Health sync never re-triggered the screen (every other tab already
+keys on refreshSeq for this reason). Added a tap-through detail view:
+today's eaten/burned/deficit, a 7-day two-line eaten-vs-burned chart, a
+weekly-goal card, and the existing weight trend reused from
+MetricExplorerView's manual-over-Apple-Health merge.
+
+Monster Finder: offers were never filtered against their own parsed
+validity window, so a not-yet-active offer (starts Thursday) could show as
+current on Monday. Added DealOffer.isCurrentlyActive (unparseable dates =
+not active, never a guess) and filter before sorting. Added a PLZ Settings
+field, wired through marktguru's own location-picker UI (their region
+cookie embeds server-only fields that can't be hand-built), with the
+Food-tab card's cache correctly invalidating on a PLZ change instead of
+sitting inert for up to 3 days.
+
+Training: a set started via the WHOOP double-tap could end itself again a
+few seconds later. Root cause: the SAME physical gesture can be delivered
+twice — once live, once replayed from the strap's own history via an
+in-flight/nearby offload sync within the existing 45s freshness window —
+arriving well past ActiveTrainingController's 2.5s/4.0s noise-debounce.
+FrameRouter now tracks the last dispatched DOUBLE_TAP's event_timestamp
+across both delivery paths so a replay of an already-handled gesture is
+dropped instead of firing onDoubleTap() a second time.
+
+Built via a 4-lane research -> implement -> review -> fix workflow (one
+lane per feature), verified end to end by hand afterward; none of this
+could be compiled locally (no Xcode in this environment) so CI is the
+first real build.
+
+---
+
 ## `5cf113c2` — Fix macOS sed incompatibility in the post-commit changelog hook (2026-09-10)
 
 'sed "1{/^\$/d}"' errors on BSD sed (macOS default) without a trailing
