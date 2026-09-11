@@ -4555,6 +4555,14 @@ struct TodayView: View {
         // page on a day with no banked stress row. nil (no usable signal) keeps the honest "Calibrating"
         // placeholder, matching StressView's empty state. Fitness age / Vitality keep their merged reads.
         stressToday = StressModel(days: repo.days, stored: await stressStoredA)?.score
+        // #stress-overhaul: prefer TODAY's live per-minute read over the nightly StressModel score for
+        // the pinned card's DISPLAYED number, so it can move within the day (e.g. right after a workout)
+        // instead of only once a night. Falls back to the StressModel score above whenever the intraday
+        // read has no current minute (early morning before enough HR has banked, or the latest minute is
+        // itself exertion-masked) — the StressModel-derived trend/baseline math is untouched either way.
+        if let intradayLevel = await intradayStressCurrentLevel() {
+            stressToday = intradayLevel
+        }
         fitnessAgeToday = (await fitnessAgeSeriesA).last?.value
         vo2maxToday = (await vo2maxSeriesA).last?.value   // #1391: latest banked VO₂max estimate
         vitalityToday = (await vitalitySeriesA).last?.value
@@ -4586,6 +4594,24 @@ struct TodayView: View {
             vo2maxToday: vo2maxToday,
             vitalityToday: vitalityToday
         )
+    }
+
+    /// #stress-overhaul: today's live per-minute stress read (`IntradayStress`), built from today's
+    /// banked HR + R-R + gravity exactly like `StressView.loadDaytime()` reads them, so the pinned card
+    /// and the dedicated Stress screen agree. Returns nil (fall back to the nightly `StressModel` score)
+    /// whenever there isn't yet a scored current minute — too little HR banked today, or the very latest
+    /// minute is itself exertion-masked (an honest "no live reading right now", not an invented one).
+    private func intradayStressCurrentLevel() async -> Double? {
+        let cal = Calendar.current
+        let startOfDay = cal.startOfDay(for: Date())
+        let from = Int(startOfDay.timeIntervalSince1970)
+        let to = Int(Date().timeIntervalSince1970)
+        let hr = await repo.hrSamples(from: from, to: to, limit: 200_000)
+        guard hr.count >= DaytimeStress.minHourHRSamples else { return nil }
+        let rr = await repo.rrIntervals(from: from, to: to, limit: 200_000)
+        let gravity = await repo.gravitySamplesUnion(from: from, to: to, limit: 200_000)
+        let tz = TimeZone.current.secondsFromGMT(for: Date())
+        return IntradayStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz).current?.level
     }
 
     /// #849: restore the history-wide outputs from a same-seq cache on a re-mount, so the dashboard repaints

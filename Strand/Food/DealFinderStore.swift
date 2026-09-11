@@ -20,19 +20,29 @@ final class DealFinderStore: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var isLoading = false
 
-    private static let cacheKey = "dealFinder.cache.v1"
+    private static let cacheKey = "dealFinder.cache.v2"   // v2: cache now also carries the PLZ it was fetched for
     private static let staleAfter: TimeInterval = 3 * 86_400   // German flyers run weekly
+
+    /// The PLZ the current `offers` were actually fetched for — compared against the live Settings
+    /// value in `refreshIfStale` so a PLZ change there isn't masked by an otherwise-fresh cache.
+    private var lastFetchedPLZ: String?
 
     init() {
         guard let data = UserDefaults.standard.data(forKey: Self.cacheKey),
               let cached = try? JSONDecoder().decode(CachedOffers.self, from: data) else { return }
         offers = cached.offers
         lastFetched = cached.fetchedAt
+        lastFetchedPLZ = cached.plz
     }
 
-    /// Refreshes only if the cache is stale (or empty) — call from `.task` on the card appearing.
+    /// Refreshes if the cache is stale (or empty), or if the PLZ in Settings has changed since the
+    /// last fetch — otherwise a PLZ change sits inert until the cache naturally goes stale (up to
+    /// `staleAfter`), since `scrape` only reads the PLZ while it actually runs.
     func refreshIfStale(product: String) async {
-        if let lastFetched, Date().timeIntervalSince(lastFetched) < Self.staleAfter { return }
+        let currentPLZ = (UserDefaults.standard.string(forKey: DealFinderLink.plzKey) ?? "")
+            .filter(\.isNumber)
+        let plzChanged = currentPLZ != (lastFetchedPLZ ?? "")
+        if let lastFetched, !plzChanged, Date().timeIntervalSince(lastFetched) < Self.staleAfter { return }
         await refresh(product: product)
     }
 
@@ -42,10 +52,12 @@ final class DealFinderStore: ObservableObject {
         defer { isLoading = false }
         do {
             let scraped = try await Self.scrape(url: url)
+            let plz = (UserDefaults.standard.string(forKey: DealFinderLink.plzKey) ?? "").filter(\.isNumber)
             offers = scraped
             lastFetched = Date()
+            lastFetchedPLZ = plz
             lastError = nil
-            if let blob = try? JSONEncoder().encode(CachedOffers(offers: scraped, fetchedAt: lastFetched!)) {
+            if let blob = try? JSONEncoder().encode(CachedOffers(offers: scraped, fetchedAt: lastFetched!, plz: plz)) {
                 UserDefaults.standard.set(blob, forKey: Self.cacheKey)
             }
         } catch {
@@ -66,6 +78,13 @@ final class DealFinderStore: ObservableObject {
         // The offer list renders client-side after didFinish fires; a short settle gives the SPA's
         // own data fetch + render pass time to complete before the DOM read below.
         try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+        let plz = (UserDefaults.standard.string(forKey: DealFinderLink.plzKey) ?? "")
+            .filter(\.isNumber)
+        if !plz.isEmpty {
+            await Self.setLocation(plz: plz, in: webView)
+        }
+
         let js = """
         Array.from(document.querySelectorAll('li.offer-list-item')).map(li => ({
             store: li.querySelector('.retailer-name a')?.textContent?.trim() ?? '',
@@ -75,10 +94,50 @@ final class DealFinderStore: ObservableObject {
         }))
         """
         guard let raw = try await webView.evaluateJavaScript(js) as? [[String: String]] else { return [] }
-        return raw.compactMap(DealOffer.init).sorted { ($0.price ?? .infinity) < ($1.price ?? .infinity) }
+        return raw.compactMap(DealOffer.init).filter(\.isCurrentlyActive)
+            .sorted { ($0.price ?? .infinity) < ($1.price ?? .infinity) }
     }
 
-    private struct CachedOffers: Codable { let offers: [DealOffer]; let fetchedAt: Date }
+    /// Drives marktguru's own location picker (the header's "Ort ändern" control) via injected JS,
+    /// rather than hand-building the `mg_user-settings` cookie: the cookie's actual shape embeds
+    /// server-assigned fields (a location id, lat/lon, timestamps) that only marktguru's own
+    /// location-search returns — verified live that writing a partial cookie ourselves degrades the
+    /// page (location shows "undefined", fewer offers render), so letting the site's own code pick
+    /// the first autocomplete match and write its own cookie is the only path that renders cleanly.
+    /// Best-effort: if the page markup doesn't match, offers still load for whatever region the
+    /// existing cookie (or none) already implies.
+    private static func setLocation(plz: String, in webView: WKWebView) async {
+        _ = try? await webView.evaluateJavaScript("document.querySelector('.location-pin')?.click();")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        _ = try? await webView.evaluateJavaScript("""
+        (() => {
+            const input = document.querySelector('input[placeholder="Suche Postleitzahl oder Ort"]');
+            if (!input) return false;
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(input, '\(plz)');
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            return true;
+        })();
+        """)
+        // The suggestion list is populated by the site's own async lookup — poll briefly instead of
+        // guessing a fixed delay.
+        for _ in 0..<8 {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            let clicked = (try? await webView.evaluateJavaScript("""
+            (() => {
+                const option = document.querySelector('li.autocomplete__option');
+                if (!option) return false;
+                option.click();
+                return true;
+            })();
+            """)) as? Bool ?? false
+            if clicked { break }
+        }
+        // Let the site's own state update + cookie write land before the offer read below.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
+
+    private struct CachedOffers: Codable { let offers: [DealOffer]; let fetchedAt: Date; let plz: String }
 }
 
 /// Signals when a WKWebView's navigation finishes or fails — separated from `DealFinderStore` so
@@ -122,6 +181,18 @@ struct DealOffer: Identifiable, Codable, Equatable {
         let f = DateFormatter()
         f.setLocalizedDateFormatFromTemplate("EE")
         return "\(f.string(from: from))–\(f.string(from: to))"
+    }
+
+    /// Whether `Date()` currently falls inside the offer's validity window. An offer whose "Gültig:"
+    /// text didn't parse (validFrom/validTo nil) is treated as NOT active — we can't confirm it's
+    /// current, so it's excluded rather than shown on a guess. `validTo` parses to midnight of its
+    /// day (no time-of-day in the source text), so the window is checked through the END of that day
+    /// — otherwise an offer would read as expired for most of its own last valid day.
+    var isCurrentlyActive: Bool {
+        guard let from = validFrom, let to = validTo,
+              let toEndOfDay = Calendar.current.date(byAdding: .day, value: 1, to: to) else { return false }
+        let now = Date()
+        return from <= now && now < toEndOfDay
     }
 
     fileprivate init?(_ raw: [String: String]) {

@@ -225,6 +225,7 @@ struct SettingsView: View {
     /// their data into NOOP itself. When ON, the Food tab shows a card linking straight to it.
     @AppStorage(DealFinderLink.enabledKey) private var dealFinderEnabled = false
     @AppStorage(DealFinderLink.productKey) private var dealFinderProduct = "Monster Energy"
+    @AppStorage(DealFinderLink.plzKey) private var dealFinderPLZ = ""
 
     /// Opt-in "Keep screen on during a workout" (default OFF, #703). When ON, the live-workout view
     /// holds the screen awake while a manual recording is running so you can glance at your live HR
@@ -1684,6 +1685,16 @@ struct SettingsView: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                         .padding(.horizontal, 12).padding(.vertical, 9)
                         .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    TextField("PLZ, z.B. 80331", text: $dealFinderPLZ)
+                        .textFieldStyle(.plain)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .padding(.horizontal, 12).padding(.vertical, 9)
+                        .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        #if os(iOS)
+                        .keyboardType(.numberPad)
+                        #endif
                 }
             }
         }

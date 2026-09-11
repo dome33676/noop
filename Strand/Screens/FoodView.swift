@@ -34,6 +34,7 @@ struct FoodView: View {
 
     @AppStorage(DealFinderLink.enabledKey) private var dealFinderEnabled = false
     @AppStorage(DealFinderLink.productKey) private var dealFinderProduct = "Monster Energy"
+    @AppStorage(DealFinderLink.plzKey) private var dealFinderPLZ = ""
     @StateObject private var dealFinder = DealFinderStore()
 
     @State private var heroFraction: Double = 0
@@ -63,7 +64,12 @@ struct FoodView: View {
                     Task { await reload() }
                 }
                 heroSection
-                if dayOffset == 0 { energyBalanceSection }
+                // Closure-based NavigationLink per #38 (see CoupledView's sleepCard, SettingsView rows) —
+                // Food owns its own NavigationStack, so this is a plain push, no new TabRoute case needed.
+                if dayOffset == 0 {
+                    NavigationLink { EnergyBalanceDetailView() } label: { energyBalanceSection }
+                        .buttonStyle(LiquidPressStyle())
+                }
                 mealsSection
                 if dealFinderEnabled { dealFinderCard }
             }
@@ -88,7 +94,11 @@ struct FoodView: View {
         .overlay(alignment: .bottom) {
             logMealButton
         }
-        .task(id: dayOffset) { await reload() }
+        // `repo.refreshSeq` in the key, not just `dayOffset` — otherwise a background/foreground Apple
+        // Health sync (which updates `AppleDaily.activeKcal` behind the scenes) never re-triggers this
+        // screen's reload, so "Burned" and the whole Energy Balance card go stale until an explicit
+        // pull-to-refresh. Every other screen keys its load task on `repo.refreshSeq` for the same reason.
+        .task(id: "\(dayOffset)|\(repo.refreshSeq)") { await reload() }
         .sheet(isPresented: $showLogSheet) {
             LogMealSheet(day: day) { entry in
                 Task { await repo.logMeal(entry); await reload() }
@@ -197,7 +207,15 @@ struct FoodView: View {
         let color = isDeficit ? StrandPalette.statusPositive : StrandPalette.statusWarning
         return NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                Text("ENERGY BALANCE").strandOverline()
+                HStack {
+                    Text("ENERGY BALANCE").strandOverline()
+                    Spacer(minLength: 0)
+                    // Now a NavigationLink label (tap-through to EnergyBalanceDetailView) — the chevron
+                    // signals that, matching mealTypeRow's affordance below.
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
                 HStack {
                     Text("\(Int(burnedToday.rounded())) kcal burned today")
                         .font(StrandFont.subhead)
@@ -289,7 +307,10 @@ struct FoodView: View {
                 }
             }
         }
-        .task(id: dealFinderProduct) { await dealFinder.refreshIfStale(product: dealFinderProduct) }
+        // PLZ folded into the task id so changing it in Settings re-triggers this card — refreshIfStale
+        // below also force-refreshes on a PLZ change, since otherwise a still-fresh cache would just
+        // skip the refetch again even once this task re-fires.
+        .task(id: "\(dealFinderProduct)|\(dealFinderPLZ)") { await dealFinder.refreshIfStale(product: dealFinderProduct) }
     }
 
     private func mealTypeRow(_ type: FoodMealType) -> some View {

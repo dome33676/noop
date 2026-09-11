@@ -381,6 +381,58 @@ public enum HRVAnalyzer {
         return out
     }
 
+    // MARK: - Rolling / windowed mean HR (companion to rollingRmssd, feeds IntradayStress)
+
+    /// One windowed mean-HR point: the mean bpm over the trailing `windowSec` of HR samples ending at
+    /// `ts` (wall-clock unix seconds). The HR-channel twin of `RollingRmssdPoint` — built from the SAME
+    /// kind of trailing window at the SAME cadence, so a minute's HR point and its RMSSD point are
+    /// directly comparable.
+    public struct RollingHRPoint: Equatable, Sendable {
+        /// Wall-clock unix seconds of the last HR sample folded into this window (the window's right edge).
+        public let ts: Int
+        /// Mean HR (bpm) over the trailing window.
+        public let meanHR: Double
+        public init(ts: Int, meanHR: Double) { self.ts = ts; self.meanHR = meanHR }
+    }
+
+    /// Pure rolling/windowed mean HR over an HR-sample series — the HR-channel companion to
+    /// `rollingRmssd` above, unfiltered (a mean has no ectopic-beat concept). For each input sample at
+    /// `ts`, the window is `(ts - windowSec, ts]`. A point is emitted only when at least
+    /// `minSamplesPerWindow` samples survive inside the window (so a sparse window emits nothing rather
+    /// than an unrepresentative mean), thinned to at most one point per `stepSec` of advance.
+    ///
+    /// - Parameters:
+    ///   - hr: the HR samples (need not be pre-sorted; sorted ascending by `ts` internally).
+    ///   - windowSec: the trailing window width in seconds.
+    ///   - stepSec: emit at most one point per this many seconds of advance. 0 (the default) emits a
+    ///     point at every sample.
+    ///   - minSamplesPerWindow: minimum samples a window needs to emit a point.
+    public static func rollingMeanHR(hr: [HRSample],
+                                     windowSec: Int,
+                                     stepSec: Int = 0,
+                                     minSamplesPerWindow: Int = 30) -> [RollingHRPoint] {
+        guard windowSec > 0, hr.count >= minSamplesPerWindow else { return [] }
+        let sorted = hr.sorted { $0.ts < $1.ts }   // Array.sorted(by:) is stable since Swift 5
+        var out: [RollingHRPoint] = []
+        var lastEmitTs: Int? = nil
+        var left = 0     // index of the oldest sample still inside the trailing window
+        var sum = 0.0    // running sum over [left, right], so each step is O(1)
+        for right in 0..<sorted.count {
+            let edgeTs = sorted[right].ts
+            sum += Double(sorted[right].bpm)
+            while left < right && edgeTs - sorted[left].ts >= windowSec {
+                sum -= Double(sorted[left].bpm)
+                left += 1
+            }
+            if stepSec > 0, let last = lastEmitTs, edgeTs - last < stepSec { continue }
+            let count = right - left + 1
+            guard count >= minSamplesPerWindow else { continue }
+            out.append(RollingHRPoint(ts: edgeTs, meanHR: sum / Double(count)))
+            lastEmitTs = edgeTs
+        }
+        return out
+    }
+
     // MARK: - R-R integrity diagnostics (#257)
 
     /// What a night's R-R coverage pair says about the capture (#550).

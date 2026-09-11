@@ -40,6 +40,11 @@ struct StressView: View {
     /// from the day's banked HR + R-R via the SAME 0–3 proxy the daily score uses. Nil
     /// until the async read completes; `.empty` when the day has no usable intraday HR.
     @State private var daytime: DaytimeStress.Result?
+    /// #stress-overhaul: today's LIVE per-minute stress read (root-cause fix for the hero gauge being
+    /// frozen at last night's value — see `displayScore`). Built from the SAME hr/rr/gravity `loadDaytime`
+    /// already fetches for `daytime`, no extra repo reads. Nil until the async read completes; `.empty`
+    /// when the day has no usable intraday HR yet.
+    @State private var intraday: IntradayStress.Result?
     /// Whether TODAY's intraday timeline is scored against the PERSONAL cross-day daytime baseline
     /// (`.baselineRelative`, once enough worn history exists) instead of the day's own calm hours
     /// (`.dayRelative`). Drives only the explanatory copy — the 0–3 scale + bands are identical either way.
@@ -109,6 +114,7 @@ struct StressView: View {
         // next to an empty timeline (the readouts are only recomputed past this guard).
         guard hr.count >= DaytimeStress.minHourHRSamples else {
             daytime = .empty
+            intraday = .empty
             stressIndex = nil
             freqHRV = nil
             return
@@ -132,6 +138,10 @@ struct StressView: View {
         if case .baselineRelative = mode { daytimeUsesPersonalBaseline = true }
         else { daytimeUsesPersonalBaseline = false }
         daytime = DaytimeStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz, mode: mode)
+        // #stress-overhaul: the LIVE per-minute read, same hr/rr/gravity, day-relative reference (the
+        // `.baselineRelative` experiment above applies only to the hourly timeline for now). This is
+        // what makes the hero gauge below move within the day instead of sitting on last night's value.
+        intraday = IntradayStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz)
 
         // ADDITIVE advanced readouts, computed on-demand from the SAME `rr` (no extra fetch, no
         // DB / schema change, and no effect on the 0..3 score above). Each engine returns nil when
@@ -218,6 +228,12 @@ struct StressView: View {
                 daytimeSection(daytime)
                     .staggeredAppear(index: 2)
             }
+
+            // 3b. Minute Detail — the scrubbable per-minute chart (complaint #4) + a day navigator
+            //     (complaint #5's day-stepper analogue for a single day) + the GESAMTER TAG same-weekday
+            //     comparison. Always shown once loaded (it carries its own empty state per shown day).
+            minuteDetailSection()
+                .staggeredAppear(index: 2)
 
             // 4. Trend over the chosen window.
             trendSection(model)
@@ -350,6 +366,202 @@ struct StressView: View {
         return date.formatted(.dateTime.hour())
     }
 
+    // MARK: 3b · Minute Detail (scrubbable per-minute chart + day navigator + weekday comparison)
+    //
+    // Complaint #4 (scrub a finger, see the exact value/time) and the day-stepper half of complaint #5 —
+    // the shared `ExploreRange` picker (StressView.swift:569, MetricExplorerView) already covers the
+    // multi-day "Stress Trend" section below and doesn't apply to a single day, so this reuses
+    // `FullDayChartView`'s day-stepper PATTERN instead (own copy here — that file is shared and owned by
+    // a concurrent task; see the ground rules).
+    //
+    // TODAY reuses `intraday`/`daytime` (already loaded by `loadDaytime()` above, no duplicate repo
+    // read); a navigated PAST day reads its own via `loadIntradayChartDayIfNeeded()`.
+
+    /// The day this chart is showing. Defaults to today; the stepper below moves it back/forward.
+    @State private var intradayChartDayStart = Calendar.current.startOfDay(for: Date())
+    /// Per-minute read for a NAVIGATED (non-today) shown day. nil while on today (see `activeIntraday`).
+    @State private var intradayChartResult: IntradayStress.Result?
+    /// Hourly totals for a NAVIGATED (non-today) shown day, for the "Whole day" band comparison below.
+    @State private var intradayChartDaytime: DaytimeStress.Result?
+    /// "Typical <weekday>" band totals folded from the last `weekdayLookbackWeeks` same-weekday days.
+    @State private var weekdayTypical: StressTotals?
+
+    private var isChartShowingToday: Bool {
+        Calendar.current.isDate(intradayChartDayStart, inSameDayAs: Date())
+    }
+    private var activeIntraday: IntradayStress.Result? { isChartShowingToday ? intraday : intradayChartResult }
+    private var activeChartDaytime: DaytimeStress.Result? { isChartShowingToday ? daytime : intradayChartDaytime }
+
+    @ViewBuilder
+    private func minuteDetailSection() -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Minute Detail", overline: "Scrub",
+                          trailing: activeIntraday?.current?.level.map { String(format: "%.1f", $0) })
+
+            chartDayNav
+
+            NoopCard(tint: StressRamp.calm) {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    if let chart = activeIntraday, chart.scored.count >= 2 {
+                        StressIntradayChart(minutes: chart.minutes)
+                        Text("Drag along the line for the exact time and value.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+
+                        Divider().overlay(StrandPalette.hairline)
+
+                        weekdayComparisonRows(today: StressTotals(hours: activeChartDaytime?.hours ?? []))
+                    } else {
+                        Text("Not enough minute-level data for \(chartDayLabel.lowercased()) yet.")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .frame(maxWidth: .infinity, minHeight: 100, alignment: .center)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+            }
+        }
+        .task(id: intradayChartDayStart) { await loadMinuteDetail() }
+    }
+
+    private var chartDayNav: some View {
+        HStack(spacing: NoopMetrics.cardInnerSpacing) {
+            Button { stepChartDay(-1) } label: {
+                Image(systemName: "chevron.left").font(StrandFont.headline.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(StrandPalette.accent)
+            .accessibilityLabel("Previous day")
+
+            Spacer()
+            Text(chartDayLabel)
+                .font(StrandFont.headline)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .monospacedDigit()
+            Spacer()
+
+            Button { stepChartDay(1) } label: {
+                Image(systemName: "chevron.right").font(StrandFont.headline.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(isOnLatestChartDay ? StrandPalette.textTertiary : StrandPalette.accent)
+            .disabled(isOnLatestChartDay)
+            .accessibilityLabel("Next day")
+        }
+    }
+
+    private var isOnLatestChartDay: Bool {
+        intradayChartDayStart >= Calendar.current.startOfDay(for: Date())
+    }
+
+    private func stepChartDay(_ delta: Int) {
+        guard let next = Calendar.current.date(byAdding: .day, value: delta, to: intradayChartDayStart) else { return }
+        if delta > 0 && next > Calendar.current.startOfDay(for: Date()) { return }
+        withAnimation(StrandMotion.interactive) { intradayChartDayStart = next }
+    }
+
+    private var chartDayLabel: String {
+        let today = Calendar.current.startOfDay(for: Date())
+        if Calendar.current.isDate(intradayChartDayStart, inSameDayAs: today) { return String(localized: "Today") }
+        if Calendar.current.isDate(intradayChartDayStart, inSameDayAs: today.addingTimeInterval(-86_400)) {
+            return String(localized: "Yesterday")
+        }
+        return Self.chartDayFmt.string(from: intradayChartDayStart)
+    }
+
+    private static let chartDayFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "EEE d MMM"; f.locale = Locale(identifier: "en_US_POSIX"); return f
+    }()
+
+    /// Read a NAVIGATED (non-today) shown day's HR + R-R once and derive both the minute chart and the
+    /// hourly "Whole day" totals from the SAME fetch. Today needs no read here — it reuses `intraday`/
+    /// `daytime` from `loadDaytime()`. Runs alongside `loadWeekdayTypical` on every day-nav step.
+    private func loadIntradayChartDayIfNeeded() async {
+        guard !isChartShowingToday else {
+            intradayChartResult = nil
+            intradayChartDaytime = nil
+            return
+        }
+        let dayStart = intradayChartDayStart
+        guard let dayEnd = Calendar.current.date(byAdding: .day, value: 1, to: dayStart) else { return }
+        let from = Int(dayStart.timeIntervalSince1970)
+        let to = Int(dayEnd.timeIntervalSince1970) - 1
+        let tz = TimeZone.current.secondsFromGMT(for: dayStart)
+        let hr = await repo.hrSamples(from: from, to: to, limit: 200_000)
+        guard hr.count >= DaytimeStress.minHourHRSamples else {
+            intradayChartResult = .empty
+            intradayChartDaytime = .empty
+            return
+        }
+        let rr = await repo.rrIntervals(from: from, to: to, limit: 200_000)
+        let gravity = await repo.gravitySamplesUnion(from: from, to: to, limit: 200_000)
+        intradayChartDaytime = DaytimeStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz)
+        intradayChartResult = IntradayStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz)
+    }
+
+    /// How many past occurrences of the shown day's weekday to fold into "Typical <weekday>". Bounded —
+    /// no migration, just `weekdayLookbackWeeks` more day-scoped HR/R-R reads, mirroring the shape of
+    /// `daytimeScoringMode`'s own trailing-history loop above.
+    private static let weekdayLookbackWeeks = 8
+
+    /// Fold the last `weekdayLookbackWeeks` same-weekday days' hourly totals (today/the shown day itself
+    /// excluded) into one comparison, reusing `DaytimeStress` (cheaper than a full per-minute read for
+    /// days that only ever feed a totals bar). nil when none of those days had a usable timeline.
+    private func loadWeekdayTypical() async {
+        let shown = Calendar.current.startOfDay(for: intradayChartDayStart)
+        var allHours: [DaytimeStress.HourPoint] = []
+        for weeksBack in 1...Self.weekdayLookbackWeeks {
+            guard let dayStart = Calendar.current.date(byAdding: .day, value: -7 * weeksBack, to: shown),
+                  let dayEnd = Calendar.current.date(byAdding: .day, value: 1, to: dayStart) else { continue }
+            let from = Int(dayStart.timeIntervalSince1970)
+            let to = Int(dayEnd.timeIntervalSince1970) - 1
+            let tz = TimeZone.current.secondsFromGMT(for: dayStart)
+            let dayHR = await repo.hrSamples(from: from, to: to, limit: 200_000)
+            guard dayHR.count >= DaytimeStress.minHourHRSamples else { continue }   // unworn day, skip
+            let dayRR = await repo.rrIntervals(from: from, to: to, limit: 200_000)
+            let dayGravity = await repo.gravitySamplesUnion(from: from, to: to, limit: 200_000)
+            let result = DaytimeStress.analyze(hr: dayHR, rr: dayRR, gravity: dayGravity, tzOffsetSeconds: tz)
+            allHours += result.hours
+        }
+        weekdayTypical = allHours.isEmpty ? nil : StressTotals(hours: allHours)
+    }
+
+    private func loadMinuteDetail() async {
+        await loadIntradayChartDayIfNeeded()
+        await loadWeekdayTypical()
+    }
+
+    /// "Whole day" (README WHOOP reference "GESAMTER TAG"): the shown day's Calm/Moderate/High split
+    /// next to the TYPICAL split for this weekday. Reuses the existing `StressTotalsBar` twice rather
+    /// than a new visual primitive.
+    @ViewBuilder
+    private func weekdayComparisonRows(today: StressTotals) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+            Text("Whole day").strandOverline()
+            HStack(alignment: .top, spacing: NoopMetrics.gap) {
+                VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                    Text("This day").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                    StressTotalsBar(totals: today)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if let weekdayTypical {
+                    VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                        Text("Typical \(weekdayName)").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                        StressTotalsBar(totals: weekdayTypical)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private var weekdayName: String {
+        let f = DateFormatter()
+        f.dateFormat = "EEEE"
+        f.locale = Locale.current
+        return f.string(from: intradayChartDayStart)
+    }
+
     // MARK: 1 · Hero — the liquid stress-level vessel.
     //
     // The 0–3 stress score reads as the signature liquid gauge: a LiquidVessel that fills to score/3
@@ -358,35 +570,63 @@ struct StressView: View {
     // one plain-English line explains the number below. Frosted card, liquid finish.
 
     private func heroCard(_ model: StressModel) -> some View {
-        NoopCard(tint: StressRamp.calm) {
+        let score = displayScore(model)
+        let band = displayBand(model)
+        return NoopCard(tint: StressRamp.calm) {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 HStack {
                     Text("Stress monitor").strandOverline()
                     Spacer()
-                    StatePill("\(model.band.title)", tone: model.band.tone, showsDot: true)
+                    StatePill("\(band.title)", tone: band.tone, showsDot: true)
                 }
 
                 HStack(alignment: .center, spacing: NoopMetrics.space5) {
                     // The stress-level vessel: fills to score/3, tinted to the live band, the value
                     // counting up over it. Taps splash the gauge (the numeral is hit-transparent).
-                    StressHeroGauge(score: model.score, tint: StressRamp.color(model.score))
+                    StressHeroGauge(score: score, tint: StressRamp.color(score))
 
                     VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-                        Text(model.band.title)
+                        Text(band.title)
                             .font(StrandFont.overline)
                             .tracking(StrandFont.overlineTracking)
-                            .foregroundStyle(StressRamp.color(model.score))
+                            .foregroundStyle(StressRamp.color(score))
                         // One plain-English line beside the gauge.
                         Text(model.explanation)
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        // #stress-overhaul: make the hero/timeline relationship explicit — the hero is
+                        // "right now" (this LIVE per-minute read), the timeline below is the whole day's
+                        // shape ending at that same point. Only shown when a live minute is actually
+                        // driving the number; otherwise the hero is honestly the nightly score (e.g.
+                        // early morning, before enough daytime HR has banked) and says nothing extra.
+                        if usesLiveScore {
+                            Text("Live · updates through the day")
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                        }
                     }
                     Spacer(minLength: 0)
                 }
             }
         }
     }
+
+    /// #stress-overhaul (root-cause fix): the DISPLAYED "current" score — today's live per-minute read
+    /// when one exists, else the nightly `StressModel` score (early morning, or the latest minute is
+    /// itself exertion-masked). The trend chart / sparkline / methodology card keep reading `model.score`
+    /// and `model.fullTrend` untouched — this only changes what the hero + "Today" tile show as *right
+    /// now*, mirroring the identical fallback in TodayView/LiquidTodayView's pinned cards.
+    private func displayScore(_ model: StressModel) -> Double {
+        intraday?.current?.level ?? model.score
+    }
+
+    private func displayBand(_ model: StressModel) -> StressBand {
+        StressBand(score: displayScore(model))
+    }
+
+    /// True when the hero/tile number above is the LIVE per-minute read rather than the nightly fallback.
+    private var usesLiveScore: Bool { intraday?.current?.level != nil }
 
     // MARK: 1b · Advanced HRV readouts (additive, on-demand)
     //
@@ -462,19 +702,23 @@ struct StressView: View {
     // MARK: 2 · Today's tiles (uniform grid)
 
     private func tileGrid(_ model: StressModel) -> some View {
-        LazyVGrid(
+        let score = displayScore(model)
+        let band = displayBand(model)
+        return LazyVGrid(
             columns: [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)],
             alignment: .leading,
             spacing: NoopMetrics.gap
         ) {
-            // Today's stress value, with its band as the caption.
+            // Today's stress value, with its band as the caption. The sparkline stays the nightly
+            // trend history (`model.sparkValues`, unchanged) even when the big number above is the
+            // live read — the trend line is "the last 14 nights", not a live-updating series.
             StatTile(
                 label: "Stress",
-                value: String(format: "%.1f", model.score),
-                caption: String(localized: "of 3 · \(model.band.title)"),
-                accent: StressRamp.color(model.score),
+                value: String(format: "%.1f", score),
+                caption: String(localized: "of 3 · \(band.title)"),
+                accent: StressRamp.color(score),
                 sparkline: model.sparkValues.count > 1 ? model.sparkValues : nil,
-                sparkColor: StressRamp.color(model.score)
+                sparkColor: StressRamp.color(score)
             )
             // Resting HR — an INCREASE is the stressful direction.
             markerTile(

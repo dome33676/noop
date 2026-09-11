@@ -1700,6 +1700,17 @@ struct LiquidTodayView: View {
         stress = await Task.detached(priority: .utility) {
             StressModel(days: daysSnapshot, stored: storedStress)?.score
         }.value
+        // #stress-overhaul: prefer TODAY's live per-minute read over the nightly StressModel score for
+        // this pinned card's DISPLAYED number (mirrors TodayView's identical override), so it moves
+        // within the day instead of only once a night. Falls back to the StressModel score above when
+        // there's no current live minute yet (see `intradayStressCurrentLevel`'s doc). Gated to
+        // `selectedDayOffset == 0`: `stress` is day-INVARIANT (StressModel always resolves "today", not
+        // the browsed day — unchanged by this fix), so re-fetching today's HR/R-R/gravity on every swipe
+        // through PAST days would be pure waste; this `load()` re-runs per swipe (unlike classic
+        // TodayView's seq-cached `loadHistoryWide`), so the extra reads only happen while Today is shown.
+        if selectedDayOffset == 0, let intradayLevel = await intradayStressCurrentLevel() {
+            stress = intradayLevel
+        }
         fitnessAge = (await fitA).last?.value   // history-wide latest banked (not day-scoped)
         vo2max = (await vo2A).last?.value        // #1391: latest banked VO₂max estimate
         vitality = (await vitA).last?.value
@@ -1774,6 +1785,24 @@ struct LiquidTodayView: View {
 
         // First load done — bring the hero gauges + sky to life now the launch churn has settled.
         if !dataLoaded { withAnimation(.easeIn(duration: 0.4)) { dataLoaded = true } }
+    }
+
+    /// #stress-overhaul: today's live per-minute stress read (`IntradayStress`), built from today's
+    /// banked HR + R-R + gravity exactly like `StressView.loadDaytime()` and TodayView's identical
+    /// helper read them, so the pinned card and the dedicated Stress screen agree. Returns nil (fall
+    /// back to the nightly `StressModel` score) whenever there isn't yet a scored current minute — too
+    /// little HR banked today, or the very latest minute is itself exertion-masked.
+    private func intradayStressCurrentLevel() async -> Double? {
+        let cal = Calendar.current
+        let startOfDay = cal.startOfDay(for: Date())
+        let from = Int(startOfDay.timeIntervalSince1970)
+        let to = Int(Date().timeIntervalSince1970)
+        let hr = await repo.hrSamples(from: from, to: to, limit: 200_000)
+        guard hr.count >= DaytimeStress.minHourHRSamples else { return nil }
+        let rr = await repo.rrIntervals(from: from, to: to, limit: 200_000)
+        let gravity = await repo.gravitySamplesUnion(from: from, to: to, limit: 200_000)
+        let tz = TimeZone.current.secondsFromGMT(for: Date())
+        return IntradayStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz).current?.level
     }
 
     // MARK: - Derived (sync, off repo.today / repo.days)

@@ -11,6 +11,7 @@ import Foundation
 enum DealFinderLink {
     static let enabledKey = "dealFinder.enabled"
     static let productKey = "dealFinder.product"
+    static let plzKey = "dealFinder.plz"
 
     /// marktguru's public search URL for a product — verified live: `/search/<query>` (a path
     /// segment, not a query param) renders real current offers with no auth needed.

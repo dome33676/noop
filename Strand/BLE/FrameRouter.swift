@@ -384,6 +384,14 @@ public final class FrameRouter {
                 // Physical inputs the strap exposes — live only (this path never sees historical
                 // replay, which goes through the Backfiller). Event strings are "NAME(rawValue)".
                 if ev.hasPrefix("DOUBLE_TAP") {
+                    // The strap also logs this same gesture to its own history, which an in-flight or
+                    // later offload can replay through dispatchLiveGestureIfFresh within
+                    // liveGestureWindowSeconds of THIS delivery — record the ts here too so that replay
+                    // recognizes it as already-dispatched instead of firing onDoubleTap() a second time
+                    // mid-set (prematurely ending an ActiveTrainingController set).
+                    if let ts = parsed.parsed["event_timestamp"]?.intValue, ts > 0 {
+                        lastDoubleTapDispatchTs = max(lastDoubleTapDispatchTs ?? 0, ts)
+                    }
                     state.onDoubleTap?()
                 } else if ev.hasPrefix("WRIST_ON") {
                     if !state.worn { state.worn = true; state.onWristChange?(true) }
@@ -566,6 +574,15 @@ public final class FrameRouter {
     /// backfill offload (old ts) is ignored, but a real-time one fires even mid-sync.
     static let liveGestureWindowSeconds = 45
 
+    /// event_timestamp of the last DOUBLE_TAP actually dispatched (live handle() or offload replay
+    /// below), whichever fired first — so the SAME physical gesture can't fire onDoubleTap() twice via
+    /// the two separate delivery paths. The strap logs every DOUBLE_TAP to its own history, and an
+    /// offload can replay that record within liveGestureWindowSeconds of the ORIGINAL live delivery, so
+    /// timestamp-freshness alone doesn't distinguish "replay of a gesture already handled" from "genuinely
+    /// new gesture". Per-connection (not reset elsewhere): a real new gesture always has a strictly
+    /// greater event_timestamp than whatever was dispatched before it this session.
+    private var lastDoubleTapDispatchTs: Int?
+
     /// Parse an EVENT frame and fire ONLY the live physical-gesture handlers (double-tap / wrist) iff the
     /// event is recent. Called for offload frames during backfill — where `handle(frame:)` is skipped —
     /// so a real-time gesture still works mid-offload (#69: the 5/MG offload runs for minutes). `now`
@@ -613,6 +630,11 @@ public final class FrameRouter {
         guard let ts = parsed.parsed["event_timestamp"]?.intValue, ts > 0 else { return }   // fail closed
         guard abs(now - ts) <= FrameRouter.liveGestureWindowSeconds else { return }
         if ev.hasPrefix("DOUBLE_TAP") {
+            // Freshness alone isn't enough here: an offload can replay the SAME gesture's history
+            // record within the window above, after the live handle() path already dispatched it (see
+            // lastDoubleTapDispatchTs). Only a strictly newer ts is a genuinely new gesture.
+            guard ts > (lastDoubleTapDispatchTs ?? 0) else { return }
+            lastDoubleTapDispatchTs = ts
             state.onDoubleTap?()
         } else if ev.hasPrefix("WRIST_ON") {
             if !state.worn { state.worn = true; state.onWristChange?(true) }
