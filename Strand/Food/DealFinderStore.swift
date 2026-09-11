@@ -85,11 +85,18 @@ final class DealFinderStore: ObservableObject {
             await Self.setLocation(plz: plz, in: webView)
         }
 
+        // `.valid` alone matches the FIRST element with that class in document order, which is the
+        // <dt class="valid">Gültig:</dt> LABEL, not the <dd class="valid">07.09. - 12.09.</dd> with
+        // the actual date range (verified live: `<dl class="dates"><dt class="valid">Gültig:</dt>
+        // <dd class="valid">07.09. - 12.09.</dd></dl>`) — every offer's `valid` field silently read
+        // "Gültig:" with no date at all, which `DealOffer.init` correctly failed to parse into
+        // validFrom/validTo, which `isCurrentlyActive` then correctly treated as "can't confirm,
+        // exclude" — so EVERY offer vanished once that filter shipped. `dd.valid` picks the actual date.
         let js = """
         Array.from(document.querySelectorAll('li.offer-list-item')).map(li => ({
             store: li.querySelector('.retailer-name a')?.textContent?.trim() ?? '',
             price: li.querySelector('.price .price')?.textContent?.trim() ?? '',
-            valid: li.querySelector('.valid')?.textContent?.trim() ?? '',
+            valid: li.querySelector('dd.valid')?.textContent?.trim() ?? '',
             info: li.querySelector('.info')?.textContent?.trim() ?? ''
         }))
         """

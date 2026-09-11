@@ -169,6 +169,11 @@ struct EnergyBalanceDetailView: View {
         let foodsById = Dictionary(uniqueKeysWithValues: await libraryTask.map { ($0.id, $0) })
         var activeByDay: [String: Double] = [:]
         for row in await appleTask where row.activeKcal != nil { activeByDay[row.day] = row.activeKcal }
+        // Apple Health's own measured `.basalEnergyBurned` per day, preferred over the formula-based
+        // `bmr` below wherever it's available — real data beats a static estimate for a complete PAST
+        // day too, and for TODAY specifically it's the live so-far read (see FoodView's identical fix).
+        var basalByDay: [String: Double] = [:]
+        for row in await appleTask where row.basalKcal != nil { basalByDay[row.day] = row.basalKcal }
 
         let bmrValue = bmr
         let todayDate = Date()
@@ -181,7 +186,7 @@ struct EnergyBalanceDetailView: View {
                 guard let food = foodsById[entry.foodItemId] else { return acc }
                 return acc + (food.kcalPer100g ?? 0) * entry.quantityGrams / 100.0
             }
-            let burned = bmrValue + (activeByDay[day] ?? 0)
+            let burned = (basalByDay[day] ?? bmrValue) + (activeByDay[day] ?? 0)
             built.append(EnergyBalanceDayPoint(day: day, date: date, eatenKcal: eaten, burnedKcal: burned))
         }
         dailyPoints = built

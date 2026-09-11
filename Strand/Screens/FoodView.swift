@@ -42,6 +42,11 @@ struct FoodView: View {
     /// — the measured-TDEE input for `CalorieTarget`. Empty until enough days accumulate.
     @State private var recentDailyBurns: [Double] = []
     @State private var todayActiveKcal: Double = 0
+    /// Apple Health's own live `.basalEnergyBurned` cumulative-so-far read (same "start of day to now"
+    /// query `todayActiveKcal` already uses) — real, measured resting energy burned SO FAR today, not
+    /// the full 24h estimate `bmr` represents. nil until loaded, or if Health has no basal-energy data
+    /// yet (new install, no Watch) — `restingKcalToday` falls back to the formula-based `bmr` then.
+    @State private var todayBasalKcal: Double?
 
     private var today: Date { Date() }
     private var day: String {
@@ -50,9 +55,13 @@ struct FoodView: View {
     private var bmr: Double {
         CalorieTarget.bmr(sex: profile.sex, weightKg: profile.weightKg, heightCm: profile.heightCm, age: profile.age)
     }
+    /// Resting energy burned SO FAR today: Apple Health's real live cumulative read when available,
+    /// else the formula-based full-day `bmr` as a last resort (better than nothing, but a flat
+    /// 24h estimate held constant all day — see `todayBasalKcal`'s doc for why the real read wins).
+    private var restingKcalToday: Double { todayBasalKcal ?? bmr }
     private var fraction: Double { goalKcal > 0 ? min(1.0, max(0.0, totals.kcal / goalKcal)) : 0 }
     private var todayBalance: Double {
-        EnergyBalance.dailyBalance(bmr: bmr, activeKcal: todayActiveKcal, eatenKcal: totals.kcal)
+        EnergyBalance.dailyBalance(bmr: restingKcalToday, activeKcal: todayActiveKcal, eatenKcal: totals.kcal)
     }
 
     var body: some View {
@@ -202,7 +211,7 @@ struct FoodView: View {
     // MARK: - Energy balance (today's actual deficit/surplus)
 
     private var energyBalanceSection: some View {
-        let burnedToday = bmr + todayActiveKcal
+        let burnedToday = restingKcalToday + todayActiveKcal
         let isDeficit = todayBalance >= 0
         let color = isDeficit ? StrandPalette.statusPositive : StrandPalette.statusWarning
         return NoopCard {
@@ -499,9 +508,12 @@ struct FoodView: View {
 
         var activeByDay: [String: Double] = [:]
         for row in appleDaily where row.activeKcal != nil { activeByDay[row.day] = row.activeKcal }
+        var basalByDay: [String: Double] = [:]
+        for row in appleDaily where row.basalKcal != nil { basalByDay[row.day] = row.basalKcal }
 
         let todayKey = Repository.localDayKey(Date())
         todayActiveKcal = activeByDay[todayKey] ?? 0
+        todayBasalKcal = basalByDay[todayKey]
 
         let bmrValue = bmr
         let pastDaysWithData = activeByDay.keys.filter { $0 != todayKey }.sorted().suffix(7)

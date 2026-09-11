@@ -11,15 +11,23 @@ import WhoopProtocol
 // pinned Today/LiquidToday card's number can move WITHIN the day (including right after a workout),
 // not just once a night.
 //
-// Same math, finer grain, same honesty rules as `DaytimeStress`:
-//   • mean HR over a trailing 5-minute window, emitted once a minute      (HR up   = stress)
-//   • RMSSD over that same window's clean R-R                            (HRV down = stress)
-// z-scored against the day's OWN calm-hour reference — deliberately the SAME reference
-// `DaytimeStress.analyze` computes internally (re-derived here from its public `Result.scored` hours,
-// see `analyze` below), so an hour point and a minute point are directly comparable on the identical
-// 0–3 curve. A bare independent per-minute reference would be far noisier than the hourly one; sharing
-// it is what keeps a minute-grain read honest (see `DaytimeStress.daytimeRMSSDScoringEnabled`'s comment
-// on how artifact-prone raw daytime R-R is off the wrist).
+// SCORED ON MEAN HR ONLY (HR up = stress) over a trailing 5-minute window, z-scored against the
+// day's OWN calm-hour reference — deliberately the SAME reference `DaytimeStress.analyze` computes
+// internally (re-derived here from its public `Result.scored` hours, see `analyze` below), so an
+// hour point and a minute point are directly comparable on the identical 0–3 curve.
+//
+// RMSSD is computed and carried on `MinutePoint.rmssd` as a READOUT ONLY — never folded into the
+// score. `DaytimeStress`'s own `daytimeRMSSDScoringEnabled` doc already documents WHY at the HOUR
+// grain: off-wrist daytime RMSSD is artifact-dominated (hourly values swing ~40→430ms as posture/
+// motion/talking break the R-R stream), and a *systematic* artifact direction (missed/extra beat
+// detections during normal activity — not just idle noise) shortens apparent RR variability, i.e.
+// *lowers* measured RMSSD, which `rawScore` reads as "HRV down = stress". At this MINUTE grain the
+// window is 12× smaller (300s vs an hour) with as few as `minBeatsPerWindow` beats, so the SAME
+// artifact is far more likely per window, not less — this is what produced a persistently-HIGH
+// score for a genuinely calm user (root-caused after a live bug report: the first version of this
+// file folded per-minute RMSSD into the score the same way `DaytimeStress`'s DEFAULT `.dayRelative`
+// hourly path already does, without the `.baselineRelative` path's caution — wrong call at this
+// grain). HR alone, while a cruder signal, is far more robust off-wrist at minute resolution.
 //
 // Motion-gated exactly like `DaytimeStress` (same `activityMaskFraction` / `postActivityShadowBPM`,
 // just applied at the finer per-minute bucket): an ambulatory minute is EXERTION, masked rather than
@@ -125,11 +133,8 @@ public enum IntradayStress {
         let day = DaytimeStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tzOffsetSeconds)
         guard !day.scored.isEmpty else { return .empty }
         let hrMeans = day.scored.compactMap { $0.meanHR }
-        let rmssdVals = day.scored.compactMap { $0.rmssd }
         let refHR = DaytimeStress.calmReference(hrMeans, calmIsLow: true)
-        let refRMSSD = DaytimeStress.calmReference(rmssdVals, calmIsLow: false)
         let sdHR = DaytimeStress.std(hrMeans, mean: DaytimeStress.mean(hrMeans))
-        let sdRMSSD = DaytimeStress.std(rmssdVals, mean: DaytimeStress.mean(rmssdVals))
 
         // Two independent rolling channels, same window/step, so a minute point and its RMSSD point
         // share a cadence even though the underlying HR and R-R streams tick at different moments.
@@ -178,9 +183,12 @@ public enum IntradayStress {
             let shadow = isAmbulatory(b - stepSec)
                 && meanHR != nil && refHR != nil && meanHR! > refHR! + DaytimeStress.postActivityShadowBPM
             let masked = meanHR != nil && (isAmbulatory(b) || shadow)
+            // HR-only score (see the header): rmssd/meanRMSSD/sdRMSSD deliberately nil/0 so
+            // `rawScore`'s HRV term is skipped entirely, same as `.baselineRelative`'s honest
+            // `hrOnlyFallback` degrade — `rmssd` itself is still carried on the point as a readout.
             let level: Double? = (meanHR != nil && !masked)
                 ? DaytimeStress.squash(DaytimeStress.rawScore(hr: meanHR, meanHR: refHR, sdHR: sdHR,
-                                                               rmssd: rmssd, meanRMSSD: refRMSSD, sdRMSSD: sdRMSSD))
+                                                               rmssd: nil, meanRMSSD: nil, sdRMSSD: 0))
                 : nil
             points.append(MinutePoint(ts: b, level: level, meanHR: meanHR, rmssd: rmssd, maskedForActivity: masked))
         }
