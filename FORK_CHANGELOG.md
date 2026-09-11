@@ -10,6 +10,39 @@ do not merge entries between the two.
 
 ---
 
+## `973afc75` — Fix Monster Finder empty results, static Energy Balance burn, and Stress Monitor reading falsely high (2026-09-11)
+
+Monster Finder: `.valid` matches the FIRST element with that class in
+document order, which is `<dt class="valid">Gültig:</dt>` (the label), not
+`<dd class="valid">07.09. - 12.09.</dd>` (the actual date range) - verified
+live against marktguru's real markup. Every offer's parsed validFrom/
+validTo was therefore always nil, which the just-shipped isCurrentlyActive
+filter correctly (but silently) treated as "can't confirm, exclude" -
+every offer vanished. Selector fixed to `dd.valid`.
+
+Energy Balance: "burned today" added the FULL day's formula-based BMR
+unconditionally, not scaled to elapsed time - so it read the same
+(~day's-worth) number all day regardless of the actual hour. Apple Health
+already exposes a live `.basalEnergyBurned` cumulative-so-far read via the
+SAME "start of day to now" query `activeKcal` uses (already collected,
+just unused) - now preferred over the static formula whenever available,
+in both FoodView's pinned card and the new detail view's 7-day series.
+
+Stress Monitor: IntradayStress folded per-minute RMSSD into the score the
+same way DaytimeStress's default hourly path already does. Off-wrist
+daytime RMSSD is artifact-dominated (DaytimeStress's own
+daytimeRMSSDScoringEnabled doc already documents this at the hour grain),
+and the artifact direction is systematic - missed/extra beat detections
+during normal activity shorten apparent RR variability, which the score
+reads as "HRV down = stress" - not random noise, a consistent high bias.
+At the minute grain the window is 12x smaller, making it far worse, which
+is exactly what produced a persistently-high reading for a genuinely calm
+user. Now HR-only, matching the caution DaytimeStress's own
+.baselineRelative path already established; RMSSD stays on MinutePoint as
+a readout only.
+
+---
+
 ## `06262512` — Stress Monitor: live per-minute score + scrubbable intraday chart; Energy Balance detail view; Monster Finder offer-date filtering + PLZ; fix WHOOP double-tap ending sets early (2026-09-11)
 
 Stress Monitor (root cause): the pinned Today/LiquidToday card and the
