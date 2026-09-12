@@ -10,6 +10,61 @@ do not merge entries between the two.
 
 ---
 
+## `75f1db78` — Fix findings from the full-codebase review: frozen Rhythm screen, double-tap dedup gap, WRIST dual-delivery, stress shadow window, deal year-boundary, hydration staleness (2026-09-12)
+
+RhythmHost (V5PillarHosts.swift): a leftover !loaded guard defeated the
+whole point of keying its .task(id:) on repo.refreshSeq -- once loaded, it
+never re-ran again for the life of the view, freezing beat-to-beat data at
+whatever the very first load produced. loaded served no other purpose here
+(unlike FusedRecordHost's, which gates a placeholder) -- removed.
+
+FrameRouter double-tap dedup (from two days ago): the live dispatch path
+skips advancing lastDoubleTapDispatchTs when event_timestamp is invalid,
+but still fires onDoubleTap() -- so a later offload replay of the same
+gesture with a VALID timestamp could still double-fire, reproducing the
+exact bug the fix was meant to close. Added a phone-clock fallback
+(lastDoubleTapDispatchWallClock) compared only against itself, never mixed
+with the strap-clock comparison, so a strap RTC reading far from phone
+time can't wrongly suppress a later genuine gesture.
+
+WRIST_ON/WRIST_OFF share the same dual live/offload-replay delivery path
+as DOUBLE_TAP but had no timestamp guard -- only the current `worn` state,
+which catches an exact duplicate but not a STALE replay arriving after a
+more recent live transition (which would flip `worn` back and re-fire
+onWristChange). Added the same event_timestamp dedup, and reset all three
+dedup fields on every new connection (family's didSet) since a strap swap
+or RTC reset could otherwise permanently suppress a genuine gesture.
+
+IntradayStress's post-exercise shadow was carried over from DaytimeStress
+as "one bucket deep" without rescaling -- one bucket is an hour at the
+hourly grain (a real recovery window) but only a minute at this grain,
+so ordinary post-workout HR recovery was reading as HIGH stress within a
+minute of a workout ending. Widened to a 15-minute window (postExercise-
+ShadowSec), still gated on HR actually being elevated so a fast recovery
+scores normally well before the window elapses.
+
+DealOffer's Dec/Jan validity-window parsing only ever rolled `from`
+forward a year, always keeping `to` at the same year as the pre-roll
+`from` -- so a window like "28.12. - 03.01." got a `to` up to a year too
+early, reading as expired throughout its own actual validity (or, scraped
+in early January, `from` itself resolved to the wrong year with no
+rollover in that direction at all). Replaced the one-directional 60-day
+heuristic with picking whichever of last/this/next year puts `from`
+closest to now, then deriving `to`'s year from whichever candidate keeps
+it on or after `from`.
+
+HydrationView's reload .task(id:) was keyed only on local user-action
+bumps, never repo.refreshSeq -- a background Apple Health water import
+never refreshed the screen while open (same bug class FoodView was fixed
+for).
+
+Found via a 7-lane parallel code review across the whole Swift codebase.
+Two other findings from that review (stale schemaVersion==23 test
+assertions, missing deviceScopedTables entries) are being fixed in
+separate concurrent sessions and are deliberately not touched here.
+
+---
+
 ## `973afc75` — Fix Monster Finder empty results, static Energy Balance burn, and Stress Monitor reading falsely high (2026-09-11)
 
 Monster Finder: `.valid` matches the FIRST element with that class in
