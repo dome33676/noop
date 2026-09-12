@@ -24,8 +24,15 @@ public final class FrameRouter {
     var family: DeviceFamily = .whoop4 {
         // #900: a fresh connection is a fresh capture session — re-arm the per-command raw-frame dump so
         // each connect can re-capture the disputed COMMAND_RESPONSE prefix once. `family` is set fresh per
-        // connection by BLEManager (connectCore), so this is the per-session reset hook.
-        didSet { rawDumpedRespCmds.removeAll(); loggedFirmwareGate = nil; deviceId = nil }
+        // connection by BLEManager (connectCore), so this is the per-session reset hook. Also clears the
+        // physical-gesture dedup state (double-tap/wrist): these compare against the STRAP's own RTC via
+        // event_timestamp, and a different (or clock-reset) strap on the next connection could otherwise
+        // produce a lower timestamp that reads as "not newer" against the previous connection's high-water
+        // mark, permanently suppressing a genuinely new gesture on that strap.
+        didSet {
+            rawDumpedRespCmds.removeAll(); loggedFirmwareGate = nil; deviceId = nil
+            lastDoubleTapDispatchTs = nil; lastDoubleTapDispatchWallClock = nil; lastWristEventTs = nil
+        }
     }
 
     /// #900: resp command names (e.g. "GET_BATTERY_LEVEL(26)") whose raw COMMAND_RESPONSE frame has already
@@ -392,10 +399,30 @@ public final class FrameRouter {
                     if let ts = parsed.parsed["event_timestamp"]?.intValue, ts > 0 {
                         lastDoubleTapDispatchTs = max(lastDoubleTapDispatchTs ?? 0, ts)
                     }
+                    // Fallback for exactly the case above where event_timestamp is missing/zero: THIS
+                    // dispatch can't advance lastDoubleTapDispatchTs, so a later offload replay of the
+                    // same gesture (arriving with a VALID ts) would otherwise still pass `ts >
+                    // (lastDoubleTapDispatchTs ?? 0)` and fire onDoubleTap() a second time. A phone-clock
+                    // timestamp here (checked only against itself below, never mixed into the strap-clock
+                    // comparison above) closes that gap without risking a strap-clock mismatch wrongly
+                    // suppressing a genuinely later gesture.
+                    lastDoubleTapDispatchWallClock = Date()
                     state.onDoubleTap?()
                 } else if ev.hasPrefix("WRIST_ON") {
+                    // Same dual-delivery-path risk DOUBLE_TAP has (see dispatchLiveGestureIfFresh): an
+                    // offload can replay a STALE wrist-transition record within liveGestureWindowSeconds
+                    // of this live one. Unlike DOUBLE_TAP, `!state.worn`/`state.worn` alone only reject an
+                    // EXACT duplicate of the CURRENT state — a stale ON replayed after a more recent live
+                    // OFF would still flip `worn` back and re-fire onWristChange. Track the dispatched
+                    // ts too so only a strictly-newer wrist event is ever applied.
+                    if let ts = parsed.parsed["event_timestamp"]?.intValue, ts > 0 {
+                        lastWristEventTs = max(lastWristEventTs ?? 0, ts)
+                    }
                     if !state.worn { state.worn = true; state.onWristChange?(true) }
                 } else if ev.hasPrefix("WRIST_OFF") {
+                    if let ts = parsed.parsed["event_timestamp"]?.intValue, ts > 0 {
+                        lastWristEventTs = max(lastWristEventTs ?? 0, ts)
+                    }
                     if state.worn { state.worn = false; state.onWristChange?(false) }
                 } else if ev.hasPrefix("STRAP_DRIVEN_ALARM_EXECUTED") {
                     // Fire observability (#401 close-out): Android has always logged this line
@@ -579,9 +606,21 @@ public final class FrameRouter {
     /// the two separate delivery paths. The strap logs every DOUBLE_TAP to its own history, and an
     /// offload can replay that record within liveGestureWindowSeconds of the ORIGINAL live delivery, so
     /// timestamp-freshness alone doesn't distinguish "replay of a gesture already handled" from "genuinely
-    /// new gesture". Per-connection (not reset elsewhere): a real new gesture always has a strictly
-    /// greater event_timestamp than whatever was dispatched before it this session.
+    /// new gesture". Reset on every new connection (`family`'s didSet): a real new gesture always has a
+    /// strictly greater event_timestamp than whatever was dispatched before it on the SAME strap
+    /// connection, but that guarantee doesn't hold across a strap swap or an RTC reset.
     private var lastDoubleTapDispatchTs: Int?
+    /// Phone wall-clock fallback for the same dedup, used only when the live dispatch's own
+    /// event_timestamp was missing/zero (so `lastDoubleTapDispatchTs` above couldn't be advanced) — see
+    /// the live DOUBLE_TAP handler. Compared only against itself (another phone-clock read), never mixed
+    /// with the strap-clock `lastDoubleTapDispatchTs` comparison, so a strap RTC that reads far from phone
+    /// time can't make this wrongly suppress a later, genuinely new gesture.
+    private var lastDoubleTapDispatchWallClock: Date?
+    /// Same dual-delivery-path dedup as `lastDoubleTapDispatchTs`, for WRIST_ON/WRIST_OFF — unlike the
+    /// double-tap case, a wrist transition's own `state.worn` check only rejects an EXACT duplicate of
+    /// the CURRENT state, not a STALE replay arriving after a more recent live transition already
+    /// flipped it (which would otherwise flip `worn` back and re-fire `onWristChange`).
+    private var lastWristEventTs: Int?
 
     /// Parse an EVENT frame and fire ONLY the live physical-gesture handlers (double-tap / wrist) iff the
     /// event is recent. Called for offload frames during backfill — where `handle(frame:)` is skipped —
@@ -634,11 +673,28 @@ public final class FrameRouter {
             // record within the window above, after the live handle() path already dispatched it (see
             // lastDoubleTapDispatchTs). Only a strictly newer ts is a genuinely new gesture.
             guard ts > (lastDoubleTapDispatchTs ?? 0) else { return }
+            // Second guard for the case the ts-based one can't see: the live dispatch that handled this
+            // same gesture may have had an invalid event_timestamp of its own, in which case
+            // lastDoubleTapDispatchTs was never advanced for it — reject a replay landing within the
+            // freshness window of ANY recent live dispatch, valid-ts or not (phone-clock comparison only,
+            // see lastDoubleTapDispatchWallClock's doc).
+            if let lastWall = lastDoubleTapDispatchWallClock,
+               Date().timeIntervalSince(lastWall) <= Double(FrameRouter.liveGestureWindowSeconds) {
+                return
+            }
             lastDoubleTapDispatchTs = ts
             state.onDoubleTap?()
         } else if ev.hasPrefix("WRIST_ON") {
+            // Same dual-delivery risk as DOUBLE_TAP: reject a STALE wrist-transition replay that's not
+            // strictly newer than the last one actually applied (live or replay) — `!state.worn` alone
+            // only catches an exact duplicate of the CURRENT state, not a stale ON replayed after a more
+            // recent live OFF (see lastWristEventTs's doc).
+            guard ts > (lastWristEventTs ?? 0) else { return }
+            lastWristEventTs = ts
             if !state.worn { state.worn = true; state.onWristChange?(true) }
         } else if ev.hasPrefix("WRIST_OFF") {
+            guard ts > (lastWristEventTs ?? 0) else { return }
+            lastWristEventTs = ts
             if state.worn { state.worn = false; state.onWristChange?(false) }
         }
     }

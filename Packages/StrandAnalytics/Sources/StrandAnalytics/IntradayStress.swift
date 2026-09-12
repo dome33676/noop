@@ -57,6 +57,16 @@ public enum IntradayStress {
     /// 5-minute window at ~1 Hz — proportionally the same floor `DaytimeStress.minHourHRSamples` (300
     /// samples / 3600 s ≈ 8%) applies at the hourly grain.
     public static let minSamplesPerWindow: Int = 30
+    /// How long a bucket stays eligible for the post-exercise shadow (HR-still-elevated masking) after
+    /// the LAST ambulatory bucket, in seconds. `DaytimeStress`'s hourly shadow is "one bucket deep" —
+    /// which works there because an hour-long bucket already covers most real HR-recovery windows, but
+    /// carrying the SAME "one bucket" rule down to this grain would mean a shadow of just 60s, when real
+    /// post-exercise HR recovery routinely takes 10-30+ minutes even in fit individuals. 900s (15 min) is
+    /// a judgment call in the middle of that range, not a validated figure — still gated on HR actually
+    /// being elevated above the calm reference (see the shadow check below), so a faster recovery scores
+    /// normally well before this window elapses; it only extends how long a SLOW recovery gets the
+    /// benefit of the doubt before reading as stress rather than exertion.
+    public static let postExerciseShadowSec: Int = 900
 
     // MARK: - Output
 
@@ -175,14 +185,21 @@ public enum IntradayStress {
         let buckets = Set(hrByBucket.keys).union(rmssdByBucket.keys).sorted()
         var points: [MinutePoint] = []
         points.reserveCapacity(buckets.count)
+        // The most recent bucket (in time order) that was itself ambulatory — the shadow window below
+        // is measured from this, not just the single immediately-preceding bucket.
+        var lastAmbulatoryBucket: Int?
         for b in buckets {
             let meanHR = hrByBucket[b]
             let rmssd = rmssdByBucket[b]
-            // Post-exercise shadow: ONE bucket deep, gated on HR not yet back at the calm reference —
-            // exactly `DaytimeStress`'s own rule, just at 60 s instead of one hour.
-            let shadow = isAmbulatory(b - stepSec)
+            let currentlyAmbulatory = isAmbulatory(b)
+            // Post-exercise shadow: eligible for up to `postExerciseShadowSec` after the LAST ambulatory
+            // bucket (not just one bucket deep — see that constant's doc for why), still gated on HR not
+            // yet back at the calm reference so a fast recovery scores normally well before the window
+            // elapses.
+            let inShadowWindow = lastAmbulatoryBucket.map { b - $0 <= Self.postExerciseShadowSec } ?? false
+            let shadow = inShadowWindow
                 && meanHR != nil && refHR != nil && meanHR! > refHR! + DaytimeStress.postActivityShadowBPM
-            let masked = meanHR != nil && (isAmbulatory(b) || shadow)
+            let masked = meanHR != nil && (currentlyAmbulatory || shadow)
             // HR-only score (see the header): rmssd/meanRMSSD/sdRMSSD deliberately nil/0 so
             // `rawScore`'s HRV term is skipped entirely, same as `.baselineRelative`'s honest
             // `hrOnlyFallback` degrade — `rmssd` itself is still carried on the point as a readout.
@@ -191,6 +208,7 @@ public enum IntradayStress {
                                                                rmssd: nil, meanRMSSD: nil, sdRMSSD: 0))
                 : nil
             points.append(MinutePoint(ts: b, level: level, meanHR: meanHR, rmssd: rmssd, maskedForActivity: masked))
+            if currentlyAmbulatory { lastAmbulatoryBucket = b }
         }
         guard !points.isEmpty else { return .empty }
         return Result(minutes: points, current: points.last)

@@ -216,25 +216,38 @@ struct DealOffer: Identifiable, Codable, Equatable {
             .replacingOccurrences(of: ",", with: ".")
         self.price = Double(priceDigits)
 
-        // "07.09. - 12.09." -> two dates. No year in the rendered text; assume the current year,
-        // rolling the FROM date forward a year if it would otherwise land more than a couple months
-        // in the past (the only way that happens is a validity window spanning a Dec->Jan boundary).
+        // "07.09. - 12.09." -> two dates. No year in the rendered text, so it has to be inferred —
+        // and near a Dec/Jan boundary the two ends of a short (days-long) window can legitimately fall
+        // in DIFFERENT years ("28.12. - 03.01."). Try `from` at last/this/next year and pick whichever
+        // lands closest to now (handles both a window starting late last year, scraped in early
+        // January, and one starting this December that runs into next January) — then derive `to`'s
+        // year from whichever of `from`'s year / `from`'s year + 1 keeps `to` on or after `from`,
+        // rather than assuming they share a year. (An earlier version only ever rolled `from` FORWARD
+        // and always kept `to` at the same year as the pre-roll `from`, so a Dec/Jan window's `to`
+        // came out up to a year too early — `isCurrentlyActive` then read the whole window as expired
+        // throughout its own actual validity.)
         let validParts = (raw["valid"] ?? "")
             .replacingOccurrences(of: "Gültig:", with: "")
             .components(separatedBy: "-")
             .map { $0.trimmingCharacters(in: .whitespaces) }
         if validParts.count == 2 {
             let cal = Calendar.current
-            let year = cal.component(.year, from: Date())
+            let now = Date()
+            let currentYear = cal.component(.year, from: now)
             func parse(_ s: String, year: Int) -> Date? {
                 let digits = s.split(separator: ".").compactMap { Int($0) }
                 guard digits.count >= 2 else { return nil }
                 return cal.date(from: DateComponents(year: year, month: digits[1], day: digits[0]))
             }
-            var from = parse(validParts[0], year: year)
-            let to = parse(validParts[1], year: year)
-            if let f = from, f.timeIntervalSinceNow < -60 * 86_400 {
-                from = parse(validParts[0], year: year + 1)
+            let from = [currentYear - 1, currentYear, currentYear + 1]
+                .compactMap { parse(validParts[0], year: $0) }
+                .min { abs($0.timeIntervalSince(now)) < abs($1.timeIntervalSince(now)) }
+            var to: Date?
+            if let from {
+                let fromYear = cal.component(.year, from: from)
+                to = [fromYear, fromYear + 1]
+                    .compactMap { parse(validParts[1], year: $0) }
+                    .first { $0 >= from }
             }
             self.validFrom = from
             self.validTo = to

@@ -61,17 +61,19 @@ struct RhythmHost: View {
     /// #1360: why the night is empty, so the empty state reads truthfully. `.gatheringData` until `load`
     /// diagnoses it (or when there simply isn't enough data yet — the honest "try again" default).
     @State private var emptyReason: RhythmEmptyState = .gatheringData
-    @State private var loaded = false
 
     private var consentGiven: Bool { enabled && RhythmConsent.isAccepted(acceptedVersion) }
 
     var body: some View {
         RhythmView(night: night, windows: windows, emptyReason: emptyReason, onClose: onClose)
-            // Only compute once consent is given (the view shows the gate otherwise) AND on fresh data.
+            // Only compute once consent is given (the view shows the gate otherwise), AND re-compute
+            // whenever fresh data lands (repo.refreshSeq in the id). A `!loaded` guard used to sit here
+            // too, but `loaded` wasn't used for anything else (unlike FusedRecordHost's, which branches
+            // its placeholder on it) — it just silently defeated every refreshSeq-driven re-run after
+            // the very first one, freezing this screen's data for the life of the view instance.
             .task(id: "\(consentGiven)|\(repo.refreshSeq)") {
-                guard consentGiven, !loaded else { return }
+                guard consentGiven else { return }
                 await load()
-                loaded = true
             }
     }
 

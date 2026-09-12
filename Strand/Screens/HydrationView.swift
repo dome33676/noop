@@ -73,7 +73,10 @@ struct HydrationView: View {
                 withAnimation(.easeOut(duration: 0.9)) { heroFraction = fraction }
             }
         }
-        .task(id: reloadTick) { await reload() }
+        // repo.refreshSeq folded in too — otherwise a background Apple Health sync landing new
+        // imported water (importedML) never refreshes this screen while it's open, only reloadTick's
+        // own local user-action bumps did (same bug class FoodView was fixed for: see its .task(id:)).
+        .task(id: "\(reloadTick)|\(repo.refreshSeq)") { await reload() }
         // #798 - edit a logged drink's amount.
         .sheet(item: $editingEntry) { entry in
             HydrationAmountSheet(title: "Edit drink", initialML: entry.amountMl) { newML in
