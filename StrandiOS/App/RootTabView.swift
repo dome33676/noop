@@ -6,6 +6,22 @@ import StrandDesign
 /// natural analogue is a `TabView` with the most-used screens as tabs and everything else under a
 /// "More" list. Every screen is the same `StrandDesign`-built view the macOS app uses.
 struct RootTabView: View {
+    /// #1841: shared with Android by NAME and meaning, not by storage — the two platforms keep their own
+    /// stores, exactly as the Clock format setting does.
+    ///
+    /// Default FALSE here while Android defaults true, and the divergence is deliberate. Apple's forums
+    /// report `.tabBarMinimizeBehavior(.onScrollDown)` failing to trigger in tabs built on
+    /// `NavigationStack(path:)` — which is every primary tab in this file, bound deliberately so a tab
+    /// root can pop and re-scroll. So this may well be inert on our structure, and defaulting ON would
+    /// advertise a behaviour that never happens. Off until someone confirms it on an iOS 26 device.
+    /// The Coach master switch, under the same `noop.` key Android writes. Default ON. Coach isn't a
+    /// tab in this fork (see the TabView comment above) — with this off, the AI is off: the Today
+    /// dashboard card goes (TodayView's `enabledDashboardCards` filter) and the daily brief is
+    /// cancelled, because the brief calls a provider from the BACKGROUND with no UI attached and would
+    /// otherwise keep posting AI notifications for a feature the wearer switched off.
+    @AppStorage("noop.coachEnabled") private var coachEnabled = true
+    @AppStorage("noop.bottomBarAutoHide") private var bottomBarAutoHide = false
+
     /// External entry points must wait until the mandatory first-run gates have completed. The root owns
     /// that state; keeping it explicit here prevents this shell's window-level sheet from covering a gate.
     let homeScreenQuickActionsEnabled: Bool
@@ -41,7 +57,7 @@ struct RootTabView: View {
     /// that tab's stack to its root (#135) by clearing its path — an animated pop that leaves the
     /// root view alive, so an at-root re-tap keeps scroll position and never re-runs `.task`
     /// (#198; the #197 resetID/`.id()` rebuild reset both). Requires the tab roots' first-hop
-    /// links to push `TabRoute` VALUES — closure-destination links bypass the path.
+    /// links to push `TabRoute`/`MoreDestination` VALUES — closure-destination links bypass the path.
     @State private var tabPaths: [NavigationPath] = Array(repeating: NavigationPath(), count: 5)
     /// One scroll-to-top token per tab. Bumped when the user re-taps the active tab while it's ALREADY
     /// at its root — the other half of the iOS convention #197/#198 left unserved (an at-root re-tap was
@@ -117,10 +133,26 @@ struct RootTabView: View {
             tab(todayTabRoot, "Today", "square.grid.2x2", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
             tab(TrendsView(), "Trends", "chart.line.uptrend.xyaxis", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
             tab(SleepView(), "Sleep", "bed.double", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
+            // Fork decision (upstream restructured this into Today/Trends/Sleep/Coach-or-More, moving
+            // Food/Training into a "More" list — this fork keeps them as direct tabs instead, since
+            // they're this fork's own actively-used features and upstream's More list doesn't even
+            // have entries for them. Coach isn't a tab here: it's already reachable via the pre-existing
+            // `routedPillar`/#1862 pillar-sheet path (see the `switch dest` above) and via Today's own
+            // Coach launcher card, plus a row in `MoreIndexView` — no new plumbing needed for it.
             tab(FoodView(), "Food", "fork.knife", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
             tab(TrainingView(), "Training", "dumbbell.fill", path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
+        // Switching Coach off while STANDING on it leaves `selectedTab` pointing at a tag no tab claims
+        // any more, which renders as an empty tab rather than as an error. Send that wearer to Today, and
+        // only in that case, so a flip made from anywhere else does not move them.
+        .onChangeCompat(of: coachEnabled) { enabled in
+            if !enabled && selectedTab == 3 { selectedTab = 0 }
+        }
+        // #1841: the same "Hide bar when scrolling" preference Android drives its own bar with. Here the
+        // system owns the behaviour — iOS 26's tab bar MINIMISES to a pill on scroll down rather than
+        // sliding away entirely, so this is the platform's read of the same intent, not a copy of ours.
+        .noopTabBarAutoHide(bottomBarAutoHide)
             // Tab crossfade — README §Motion: ~240ms opacity swap between tab roots, global calm
             // easing cubic-bezier(0.22,1,0.36,1).
             .animation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24), value: selectedTab)
@@ -205,6 +237,11 @@ struct RootTabView: View {
                 // so a deep-link lands on the Today tab where that entry lives.
                 withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 0 }
                 router.requestedDestination = nil
+            case .coach:
+                // #1862: the Today Coach launcher hands its question here. Coach is a pillar sheet on
+                // iPhone, the same as the Insights hub, so route it that way rather than switching tabs.
+                routedPillar = dest
+                router.requestedDestination = nil
             case .journal:
                 // The #627 Today journal widget opens the journal through the quick-action Journal sheet
                 // (InsightsView), matching the FAB's "Log journal" action. Calm sheet easing.
@@ -243,6 +280,9 @@ struct RootTabView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { checkJournalWakePrompt() }
         }
+        // Fork decision: this fork doesn't carry upstream's Lift Log feature (see the tab-bar comment
+        // above), so the corresponding "running gym session" floating bar / LiftSessionView sheet /
+        // LiftSessionPersistence resume that used to sit here is deliberately not adopted.
         // Race fix: this scenePhase callback and StrandiOSApp's own (which drives the actual Apple
         // Health import via health.sync() -> refreshAfterAppleHealthSync) are two independent,
         // unawaited Tasks reacting to the SAME .active transition with no ordering between them. The
@@ -342,6 +382,10 @@ struct RootTabView: View {
                 // .food is a primary tab, routed via `selectedTab` above (handled above); this keeps the
                 // switch exhaustive and falls back to Food if it ever reaches the pillar host.
                 case .food: FoodView()
+                // #1862: Coach IS presented here — the launcher sheet routes to it as a pillar, so unlike
+                // the fallbacks above this arm is the real destination, not a safety net. K5: also the
+                // scheduled morning-brief notification's tap-through target.
+                case .coach: CoachView()
                 }
             }
             // The Trends/Today fallbacks above emit TabRoute value pushes (#198), which need a
@@ -454,7 +498,6 @@ struct RootTabView: View {
         .environment(\.scrollToTopSignal, scrollSignal)
         .tabItem { Label(title, systemImage: icon) }
     }
-
 }
 
 // MARK: - Quick actions (centre FAB)
@@ -539,3 +582,25 @@ private struct QuickActionSheet: View {
 }
 
 #endif
+
+/// #1841: apply the iOS 26 tab-bar minimise behaviour, doing nothing on older systems.
+///
+/// The availability branch is deliberately the ONLY branch. `RootTabView` already documents what happens
+/// when a condition that flips at runtime wraps this `TabView`: #519 put two states in separate
+/// `_ConditionalContent` branches, and every navigation rebuilt the whole subtree, resetting `@State`
+/// inside the tab roots — scroll offsets, chart ranges, expanded sections.
+///
+/// So the preference must NOT select between branches. It selects the modifier's ARGUMENT, while the
+/// availability check — fixed for the life of the process — is what picks a branch. Toggling the setting
+/// changes a value, never the view's identity.
+extension View {
+    @ViewBuilder
+    func noopTabBarAutoHide(_ enabled: Bool) -> some View {
+        if #available(iOS 26.0, *) {
+            // `.onScrollDown` minimises to a pill on downward scroll; `.never` pins it fully visible.
+            self.tabBarMinimizeBehavior(enabled ? .onScrollDown : .never)
+        } else {
+            self
+        }
+    }
+}

@@ -44,7 +44,26 @@ enum RescoreBackgroundScheduler {
     /// marks each produce a distinct one, the last wins, and it cannot equal any pass's captured token.
     static let owedTokenKey = "noop.rescoreOwedToken"
 
+    /// Whether the outstanding debt was left by a pass that COMPLETED but could not settle, as opposed to
+    /// one that was killed partway.
+    ///
+    /// #2238: the two are not the same question, and `isRescoreOwed` alone cannot tell them apart. A killed
+    /// pass deliberately never advanced `analyzeWatermarkKey`, so its resume must force. A pass that
+    /// completed and was merely out-voted by a newer token DID advance the watermark on its way out, so its
+    /// resume can ask the fingerprint whether anything actually changed and stand down when nothing did.
+    ///
+    /// Forcing both is what lets an Oura ring draining every 5 minutes re-score 21 nights back to back for
+    /// as long as the app is awake: each pass outlives its own debt, the resume forces a fresh one, and the
+    /// chain never reaches a quiet interval it can stop at.
+    static let owedAfterCompletedPassKey = "noop.rescoreOwedAfterCompletedPass"
+
     static var isRescoreOwed: Bool { UserDefaults.standard.bool(forKey: owedKey) }
+
+    /// True only while the outstanding debt came from a completed-but-unsettled pass. Cleared by the next
+    /// `markRescoreOwed()`, so a debt recorded by a pass that then dies reverts to forcing.
+    static var isOwedAfterCompletedPass: Bool {
+        UserDefaults.standard.bool(forKey: owedAfterCompletedPassKey)
+    }
 
     static var currentOwedToken: String? { UserDefaults.standard.string(forKey: owedTokenKey) }
 
@@ -64,6 +83,10 @@ enum RescoreBackgroundScheduler {
         let token = UUID().uuidString
         UserDefaults.standard.set(true, forKey: owedKey)
         UserDefaults.standard.set(token, forKey: owedTokenKey)
+        // A fresh debt is unproven until the pass that owns it finishes: if THIS pass is killed, the
+        // watermark never advances and its resume must force. Cleared here rather than at completion so
+        // the flag describes the CURRENT debt, never the previous one (#2238).
+        UserDefaults.standard.set(false, forKey: owedAfterCompletedPassKey)
         return token
     }
 
@@ -99,6 +122,11 @@ enum RescoreBackgroundScheduler {
         let settled = maySettleDebt(capturedToken: owedToken, currentToken: currentOwedToken)
         if settled {
             UserDefaults.standard.set(false, forKey: owedKey)
+        } else {
+            // #2238: this pass finished and advanced the watermark; only a newer token outvoted it. Record
+            // that, so the resume can gate on the fingerprint instead of forcing a pass whose inputs may be
+            // byte-identical to the one that just ran.
+            UserDefaults.standard.set(true, forKey: owedAfterCompletedPassKey)
         }
         if seconds.isFinite, seconds > 0 {
             UserDefaults.standard.set(seconds, forKey: lastPassSecondsKey)
@@ -136,14 +164,18 @@ enum RescoreBackgroundScheduler {
     ///   would conjure a forced full pass for a processing task to run when very likely nothing changed,
     ///   which is the churn #1146 exists to avoid. A debt an earlier real pass already recorded is
     ///   untouched either way.
+    /// - Parameter passInProgress: a pass is already running in this process; see
+    ///   `RescoreBackgroundPolicy.decide`.
     static func run(isBackground: Bool? = nil,
                     owesOnDefer: Bool = true,
+                    passInProgress: Bool = false,
                     log: @escaping (String) -> Void,
                     work: () async -> Void) async {
         let decision = RescoreBackgroundPolicy.decide(
             isBackground: isBackground ?? isBackgrounded,
+            isRealUpdate: owesOnDefer,
             rescoreAlreadyOwed: isRescoreOwed,
-            lastCompletedPassSeconds: lastCompletedPassSeconds)
+            passInProgress: passInProgress)
 
         switch decision {
         case .deferToBackgroundTask(let reason):
@@ -165,6 +197,47 @@ enum RescoreBackgroundScheduler {
         }
     }
 
+    /// How many times the re-score execution assertion has expired in this process. A pass reads it at its
+    /// start and end, so its cost line can say whether it outlived its background grant.
+    private(set) static var assertionExpiries = 0
+
+    /// CPU seconds this process has used, user plus system, across all threads. Process-wide, so it includes
+    /// the BLE and UI work beside a pass; nil if the kernel refuses the read.
+    nonisolated static func processCPUSeconds() -> Double? {
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0 else { return nil }
+        func seconds(_ t: timeval) -> Double { Double(t.tv_sec) + Double(t.tv_usec) / 1_000_000 }
+        return seconds(usage.ru_utime) + seconds(usage.ru_stime)
+    }
+
+    /// What a completed pass cost, and whether it outlived its background grant.
+    ///
+    /// The `re-score: done` duration is uptime, which keeps running while the process is suspended, so on
+    /// its own it cannot separate a pass that was suspended and resumed across wakes from one that ran on
+    /// past an expired assertion. CPU time beside it can: a pass that spends a small fraction of its elapsed
+    /// time on CPU was mostly suspended, and `expired` says whether the assertion ran out on the way.
+    nonisolated static func passCostLogLine(cpuSeconds: Double?, elapsedSeconds: Double,
+                                            assertionExpiries: Int, backgroundedAtEnd: Bool) -> String {
+        let cpu = cpuSeconds.map { String(format: "%.1fs", max(0, $0)) } ?? "n/a"
+        let share = cpuSeconds.flatMap { elapsedSeconds > 0 ? Int((max(0, $0) / elapsedSeconds * 100).rounded()) : nil }
+        return "re-score: cost cpu=\(cpu) elapsed=\(String(format: "%.1f", elapsedSeconds))s"
+            + " cpuShare=\(share.map { "\($0)%" } ?? "n/a") assertionExpired=\(assertionExpiries)"
+            + " backgrounded=\(backgroundedAtEnd)"
+    }
+
+    /// Rest between units of re-score work when backgrounded, so the pass stays under iOS's background CPU
+    /// limit instead of being killed by it (`RescoreBackgroundPolicy.backgroundRestPerWorkSecond`). `mark` is
+    /// the uptime the work since the last rest started at, in nanoseconds. It is left alone until a quantum of
+    /// work has built up (`backgroundWorkQuantumSeconds`), so short units run back to back, and it is reset
+    /// after a rest or in the foreground.
+    nonisolated static func paceIfBackgrounded(since mark: inout UInt64) async {
+        let workSeconds = Double(DispatchTime.now().uptimeNanoseconds &- mark) / 1_000_000_000
+        let background = await MainActor.run { isBackgrounded }
+        let rest = RescoreBackgroundPolicy.restSeconds(afterWorkSeconds: workSeconds, isBackground: background)
+        if rest > 0 { try? await Task.sleep(nanoseconds: UInt64(rest * 1_000_000_000)) }
+        if rest > 0 || !background { mark = DispatchTime.now().uptimeNanoseconds }
+    }
+
     /// Hold an execution assertion for the duration of `work` so a SHORT pass is not suspended halfway.
     /// A long one still outlives the grant; the assertion's expiry handler is where that becomes visible
     /// in the log and where the work is escalated, rather than the process simply vanishing.
@@ -178,7 +251,8 @@ enum RescoreBackgroundScheduler {
             // the owed mark is still set (only a completed pass clears it) and that is what the next
             // decision reads.
             MainActor.assumeIsolated {
-                log("re-score: background time expired before the pass finished — escalating (#1538)")
+                assertionExpiries += 1
+                log("re-score: background time expired mid-pass — it resumes on the next wake (#1538)")
                 schedule()
                 assertion.end()
             }
@@ -201,7 +275,10 @@ enum RescoreBackgroundScheduler {
     /// Register the handler. MUST be called from `StrandiOSApp.init()` before launch finishes, and the
     /// identifier MUST be listed in `BGTaskSchedulerPermittedIdentifiers`, or iOS never delivers the task.
     /// Safe to leave uncalled: `schedule()` fails gracefully and the foreground path still scores.
-    static func register(perform operation: @escaping @MainActor () async -> Void) {
+    /// `onExpire` reports iOS reclaiming the processing time before the pass finished. The pass keeps no
+    /// record of it otherwise, so a strap log that simply stops mid-night cannot say why.
+    static func register(perform operation: @escaping @MainActor () async -> Void,
+                         onExpire: @escaping @MainActor () -> Void = {}) {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { task in
             let completion = TaskCompletionGuard(task: task)
             let worker = Task { @MainActor in
@@ -215,6 +292,7 @@ enum RescoreBackgroundScheduler {
             }
             task.expirationHandler = {
                 worker.cancel()
+                Task { @MainActor in onExpire() }
                 // The pass did not finish inside the processing budget either. Ask for another rather
                 // than dropping the work, and report the failure so iOS's own scheduling heuristics see
                 // it honestly instead of being told this succeeded.

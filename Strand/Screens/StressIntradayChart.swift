@@ -116,7 +116,7 @@ struct StressIntradayChart: View {
     }
 
     private func readoutBubble(_ p: PlotPoint, chartWidth: CGFloat) -> some View {
-        let label = "\(String(format: "%.1f", p.level)) · \(timeLabel(p.ts))"
+        let label = "\(StressTrace.formatLevel(p.level)) · \(timeLabel(p.ts))"
         // Clamp so the bubble never clips past either edge of the chart.
         let centerX = min(max(p.x, bubbleWidth / 2), chartWidth - bubbleWidth / 2)
         return Text(label)
@@ -168,7 +168,7 @@ struct StressIntradayChart: View {
         guard let first = scored.first, let last = scored.last else {
             return String(localized: "No minute-level stress data yet for this day.")
         }
-        return String(localized: "Minute-by-minute stress from \(timeLabel(first.0)) to \(timeLabel(last.0)), latest \(String(format: "%.1f", last.1)).")
+        return String(localized: "Minute-by-minute stress from \(timeLabel(first.0)) to \(timeLabel(last.0)), latest \(StressTrace.formatLevel(last.1)).")
     }
 }
 

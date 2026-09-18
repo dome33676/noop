@@ -46,7 +46,7 @@ final class StrengthStoreTests: XCTestCase {
     }
 
     func testSchemaVersionIs20() {
-        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 23)
+        XCTAssertEqual(WhoopStoreInfo.schemaVersion, 25)
     }
 
     // MARK: - v46 migration (additive: per-set warm-up flag + optional effort rating on strengthSet)

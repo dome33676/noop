@@ -99,6 +99,46 @@ internal data class Vital(
 }
 
 /**
+ * Whether the skin-temp screen must explain a SHORTENED series (#1847).
+ *
+ * Leading with the absolute means the chart and table must read the absolute column, because an absolute
+ * plotted against a history of deviations is arithmetic on two scales. Nights that only ever recorded a
+ * deviation therefore drop out — and after a sync refills the 21-night `analyzeRecent` window on an install
+ * with older history, the reading count visibly falls with nothing on screen saying why.
+ *
+ * ONLY when leading with the absolute. The deviation-led branch also drops rows — calibrating nights that
+ * have only an absolute, and the #622 bimodal partition — but they are the OPPOSITE kind, so this note's
+ * sentence would be precisely backwards there. Gated inside the rule rather than at the call site, because
+ * the function name promises the whole rule.
+ *
+ * True only when rows were actually dropped, so a complete series stays silent.
+ */
+internal fun shouldExplainShortenedSkinTempSeries(
+    leadsAbsolute: Boolean,
+    shownReadings: Int,
+    rowsWithEitherNumber: Int,
+): Boolean = leadsAbsolute && shownReadings < rowsWithEitherNumber
+
+/**
+ * Whether the skin-temp screen must EXPLAIN itself (#1847).
+ *
+ * `leadReading` deliberately falls back: asking for a temperature on a night that only ever recorded a
+ * deviation shows the deviation rather than blanking. That is right, but silent — the setting then looks
+ * broken, because both choices render the same Δ°C.
+ *
+ * Requires that NO night in the window carries a temperature. #1850 removed the other case entirely:
+ * the preference now applies across the window, so a single stored temperature anywhere means the screen
+ * leads with temperatures rather than falling back and needing to explain itself.
+ *
+ * Pure so the decision is testable without Compose.
+ */
+internal fun shouldExplainSkinTempFallback(
+    prefer: SkinTempDisplay.Kind,
+    leadsAbsolute: Boolean,
+    anyAbsoluteInWindow: Boolean,
+): Boolean = prefer == SkinTempDisplay.Kind.ABSOLUTE && !leadsAbsolute && !anyAbsoluteInWindow
+
+/**
  * Whether the skin-temp tile leads with the night's ABSOLUTE (#1636).
  *
  * True whenever the displayed night measured one. A deviation with no anchor cannot be read — "+0.9" is
@@ -114,7 +154,11 @@ internal data class Vital(
  *
  * Twin of the Swift tile's `skinAbsRow != nil` branch.
  */
-internal fun skinTempLeadsWithAbsolute(absC: Double?): Boolean = absC != null
+internal fun skinTempLeadsWithAbsolute(
+    absC: Double?,
+    devC: Double? = null,
+    prefer: SkinTempDisplay.Kind = SkinTempDisplay.Kind.ABSOLUTE,
+): Boolean = SkinTempDisplay.leadReading(absC, devC, prefer)?.kind == SkinTempDisplay.Kind.ABSOLUTE
 
 /**
  * The deviation note shown beneath an absolute skin temperature — "+0.2 Δ°F" (#1636).
@@ -170,6 +214,9 @@ internal fun vitalsFor(
     spo2CandidateByDay: Map<String, Double> = emptyMap(),
     spo2ToggleOn: Boolean = false,
     hrvOverCountByDay: Map<String, Double> = emptyMap(),   // #1118
+    // #1846: the Settings lead-with choice. Travels like tempUnit so the Health tile agrees with Today
+    // and the detail screen — a setting that reaches two of three surfaces is worse than none.
+    skinTempPreferred: SkinTempDisplay.Kind = SkinTempDisplay.Kind.ABSOLUTE,
 ): List<Vital> {
     val todayKey = d?.day
     // History strictly before the displayed day, oldest→newest (recentDays is already
@@ -208,7 +255,7 @@ internal fun vitalsFor(
     // display that shipped before, unchanged. `leadsAbsolute` also decides which SERIES backs the
     // banding and the trail below — an absolute scored against a history of deviations would be
     // nonsense, so the two must move together.
-    val leadsAbsolute = skinTempLeadsWithAbsolute(d?.skinTempC)
+    val leadsAbsolute = skinTempLeadsWithAbsolute(d?.skinTempC, d?.skinTempDevC, skinTempPreferred)
     val skin = if (leadsAbsolute) d?.skinTempC else d?.skinTempDevC
     // Track which kind the value is so the temperature converter picks the right rule: an ABSOLUTE
     // reading uses the full C→F formula (×9/5 + 32); a ±DEVIATION must omit the offset.
@@ -385,8 +432,12 @@ internal fun latestVitals(
     spo2CandidateByDay: Map<String, Double> = emptyMap(),
     spo2ToggleOn: Boolean = false,
     hrvOverCountByDay: Map<String, Double> = emptyMap(),   // #1118
+    // #1846: the Settings lead-with choice. Travels like tempUnit so the Health tile agrees with Today
+    // and the detail screen — a setting that reaches two of three surfaces is worse than none.
+    skinTempPreferred: SkinTempDisplay.Kind = SkinTempDisplay.Kind.ABSOLUTE,
 ): List<Vital> {
-    val emptyByKey = vitalsFor(null, days, tempUnit, spo2CandidateByDay, spo2ToggleOn, hrvOverCountByDay).associateBy { it.key }
+    val emptyByKey = vitalsFor(null, days, tempUnit, spo2CandidateByDay, spo2ToggleOn, hrvOverCountByDay,
+                               skinTempPreferred).associateBy { it.key }
     return listOf(
         latestVital("resp", days, tempUnit, emptyByKey, spo2CandidateByDay, spo2ToggleOn) { it.respRateBpm != null },
         latestVital("spo2", days, tempUnit, emptyByKey, spo2CandidateByDay, spo2ToggleOn) {
@@ -395,7 +446,12 @@ internal fun latestVitals(
         latestVital("spo2raw", days, tempUnit, emptyByKey, spo2CandidateByDay, spo2ToggleOn) { it.spo2Red != null && it.spo2Ir != null },
         latestVital("rhr", days, tempUnit, emptyByKey, spo2CandidateByDay, spo2ToggleOn) { it.restingHr != null },
         latestVital("hrv", days, tempUnit, emptyByKey, hrvOverCountByDay = hrvOverCountByDay) { it.avgHrv != null },
-        latestVital("skin", days, tempUnit, emptyByKey) { it.skinTempDevC != null },
+        // #1846: pass the preference (the other keys' rows don't read it). The predicate takes EITHER
+        // number for the same reason `lastSkinTempReadingRow` does — a calibrating night has a measured
+        // absolute and no deviation yet, and a deviation-only test walks straight past it.
+        latestVital("skin", days, tempUnit, emptyByKey, skinTempPreferred = skinTempPreferred) {
+            it.skinTempC != null || it.skinTempDevC != null
+        },
     )
 }
 
@@ -416,6 +472,7 @@ private fun latestVital(
     spo2ToggleOn: Boolean = false,
     hrvOverCountByDay: Map<String, Double> = emptyMap(),   // #1118
     todayKey: String = logicalDayKeyNow(),
+    skinTempPreferred: SkinTempDisplay.Kind = SkinTempDisplay.Kind.ABSOLUTE,   // #1846
     hasValue: (DailyMetric) -> Boolean,
 ): Vital {
     val row = Baselines.freshestCarried(
@@ -423,7 +480,10 @@ private fun latestVital(
         todayKey,
     )?.second
     return row
-        ?.let { latestRow -> vitalsFor(latestRow, days, tempUnit, spo2CandidateByDay, spo2ToggleOn, hrvOverCountByDay).firstOrNull { it.key == key } }
+        ?.let { latestRow ->
+            vitalsFor(latestRow, days, tempUnit, spo2CandidateByDay, spo2ToggleOn, hrvOverCountByDay,
+                      skinTempPreferred).firstOrNull { it.key == key }
+        }
         ?.copy(asOfLabel = asOfLabel(row.day))
         ?: emptyByKey.getValue(key)
 }

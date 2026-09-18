@@ -1,5 +1,6 @@
 import Foundation
 import WhoopProtocol
+import WhoopStore
 import StrandAnalytics
 
 /// Pure decode→state router. Takes a COMPLETE (already reassembled) frame, decodes it with
@@ -9,6 +10,11 @@ public final class FrameRouter {
     private let state: LiveState
     /// Called when the strap pushes an EVENT packet (WHOOP's strap-as-clock catch-up signal). The
     /// BLEManager wires this to a rate-limited requestSync(.strap). nil in pure/unit contexts.
+    /// #1193: the WHOOP 4.0 strap serial, decoded from the `GET_HELLO_HARVARD` (35) response. A 4.0 has
+    /// no DIS serial, so this is its only stable identity — see `Whoop4HelloSerial`. Fires on every hello;
+    /// the manager decides whether it is confirmed enough to adopt.
+    var onStrapSerial: ((String) -> Void)?
+
     var onSyncTrigger: (() -> Void)?
     /// #1706: which strap this connection is talking to, so an alarm readback can be attributed to a
     /// device. Set per connection by BLEManager immediately AFTER `family`, whose didSet clears this —
@@ -24,16 +30,28 @@ public final class FrameRouter {
     var family: DeviceFamily = .whoop4 {
         // #900: a fresh connection is a fresh capture session — re-arm the per-command raw-frame dump so
         // each connect can re-capture the disputed COMMAND_RESPONSE prefix once. `family` is set fresh per
-        // connection by BLEManager (connectCore), so this is the per-session reset hook. Also clears the
-        // physical-gesture dedup state (double-tap/wrist): these compare against the STRAP's own RTC via
-        // event_timestamp, and a different (or clock-reset) strap on the next connection could otherwise
-        // produce a lower timestamp that reads as "not newer" against the previous connection's high-water
-        // mark, permanently suppressing a genuinely new gesture on that strap.
+        // connection by BLEManager (connectCore), so this is the per-session reset hook. Also clears
+        // WRIST dedup state (compares against the STRAP's own RTC via event_timestamp, and a different
+        // or clock-reset strap on the next connection could otherwise produce a lower timestamp that
+        // reads as "not newer," permanently suppressing a genuinely new gesture) and the double-tap
+        // dedup memory (upstream's dispatchedDoubleTapEventTs — self-pruning by window already, but
+        // cleared here too so a new connection never carries a stale entry from a different strap).
         didSet {
             rawDumpedRespCmds.removeAll(); loggedFirmwareGate = nil; deviceId = nil
-            lastDoubleTapDispatchTs = nil; lastDoubleTapDispatchWallClock = nil; lastWristEventTs = nil
+            rejectTally = FrameRejectTally(); loggedRejectReasons.removeAll()
+            lastWristEventTs = nil; dispatchedDoubleTapEventTs.removeAll()
         }
     }
+
+    /// Rejected frames on this connection, per reason, plus the one named counter for the class that
+    /// used to pass the gates (payload CRC32 verified, envelope not). Reset per connection alongside the
+    /// other per-connection routing state, since that is the unit the readout is about.
+    public private(set) var rejectTally = FrameRejectTally()
+
+    /// Reasons already reported on this connection, so the Test Centre line is one per REASON rather
+    /// than one per frame: a noisy link rejects continuously, and a per-frame line would bury the
+    /// transition that carries the information.
+    private var loggedRejectReasons: Set<FrameRejectReason> = []
 
     /// #900: resp command names (e.g. "GET_BATTERY_LEVEL(26)") whose raw COMMAND_RESPONSE frame has already
     /// been dumped this connection. The provenance dump fires once per command per session so a 4.0's
@@ -65,9 +83,14 @@ public final class FrameRouter {
         assert(parsed == parseFrame(frame, family: family),
                "FrameRouter.handle: threaded ParsedFrame != fresh parse (#47 parse-once invariant)")
         #endif
-        guard parsed.ok else { return }
-        // Reject frames that failed their checksum — never let bad bytes drive state.
-        if parsed.crcOK == false { return }
+        // ONE gate, the verifier's FULL verdict: header checksum, payload CRC32 and structural length
+        // together. This used to be two steps — a parse-succeeded flag, then a separate payload-CRC
+        // check — and between them sat the class this change closes: a frame whose payload CRC32 is
+        // right while its header checksum or declared length is not. Never let bad bytes drive state.
+        guard parsed.ok else {
+            noteRejectedFrame(parsed)
+            return
+        }
 
         // #987: stamp frame liveness for the Connection readout's "last frame" row. A plain (non-
         // published, see LiveState) Int write, so the raw flood costs no re-renders here.
@@ -163,6 +186,32 @@ public final class FrameRouter {
                 let verdict = r == nil ? "no result byte" : (accepted ? "accepted" : "REJECTED")
                 state.append(log: "reboot: strap acked result=\(rhex) (\(verdict))")
             }
+            // #1823: the clock exchange, on BOTH families. NOOP wrote "clock synced" the instant it queued
+            // the writes and never read the answer, so a strap log asserted the clock was set while the
+            // readout said 1970/71 — two contradictory lines with nothing to separate them. Same
+            // accept/reject shape REBOOT_STRAP already uses: the family's own result offset and polarity
+            // (5/MG 1=SUCCESS, 4.0 0=SUCCESS). LOG-ONLY; it never gates behaviour.
+            if let cmd = parsed.cmdName, cmd.hasPrefix("SET_CLOCK") || cmd.hasPrefix("GET_CLOCK") {
+                // NO accept/reject verdict here, on EITHER family, and that is deliberate.
+                //
+                // 4.0's 0=accepted is the reboot probe's own explicitly UNVERIFIED reading. And on 5/MG
+                // the result byte may not exist at all for this command: the captured-frame fixture builds
+                // a puffin COMMAND_RESPONSE as [36, seq, cmd] + payload at offset 8, so @11 is already
+                // PAYLOAD and the @12 that `commandResultByte` reads is a payload byte, not a result code.
+                // REBOOT_STRAP's use of it was validated against reboot's own frames; nothing establishes
+                // it for the clock.
+                //
+                // Inventing a verdict from that is precisely the fault this line was added to fix - the
+                // old "clock synced" log asserted an outcome nobody had checked. So quote the evidence
+                // and let a maintainer decode it: the byte at the family's result offset, and the WHOLE
+                // frame (#900's format), uncapped. A truncated clock frame answers nothing, and the full
+                // frame is what makes a wrong offset assumption visible instead of silently misleading.
+                let r = Self.commandResultByte(in: frame, family: family)
+                let rhex = r.map { String(format: "0x%02x", UInt8(truncatingIfNeeded: $0)) } ?? "none"
+                state.append(log: "clock: \(cmd) reply byte@resultOffset=\(rhex) "
+                                + "frame=\(Self.fullFrameHex(frame))",
+                             domain: .connection)
+            }
             if family == .whoop4, let cmd = parsed.cmdName {
                 if cmd.hasPrefix("GET_ADVERTISING_NAME_HARVARD") {
                     if let name = Self.advertisingName(in: frame), !name.isEmpty {
@@ -249,7 +298,7 @@ public final class FrameRouter {
                     let r = Self.commandResultByte(in: frame)
                     let rhex = r.map { String(format: "0x%02x", UInt8(truncatingIfNeeded: $0)) } ?? "none"
                     state.append(log: "Alarm: strap answered the arm (SET_ALARM_TIME) with result=\(rhex) — log-only, 4.0 result-code meaning unverified")
-                } else if cmd.hasPrefix("GET_HELLO_HARVARD"), TestCentre.active(.connection) {
+                } else if cmd.hasPrefix("GET_HELLO_HARVARD") {
                     // #1303: capture aid for WHOOP-4.0 stable-serial identity. The strap serial lives in this
                     // GET_HELLO_HARVARD (cmd 35) response. This used to dump the payload RAW, which answered
                     // the question — the serial is the 9-char alnum run at offset 14 — but a captured 4.0
@@ -265,10 +314,18 @@ public final class FrameRouter {
                     // the 5/MG device-name offset and means nothing in a cmd-35 payload — passing it would
                     // mislabel whatever run happened to start there. Log-only; decodes/persists nothing.
                     let helloPay = Self.commandResponsePayload(in: frame) ?? []
-                    state.append(log: HelloIdentityProbe.report(payload: helloPay,
-                                                                block: "HELLO_HARVARD(35)",
-                                                                knownNameOffset: -1)
-                                 + " — locate the strap serial offset (#1303)")
+                    // #1193: the identity read is UNGATED, unlike the probe below it. Adoption has to
+                    // work for every 4.0 user, and Test Centre is off for almost all of them — gating it
+                    // would ship a stable id only to the people already debugging. The decoder reads a
+                    // fixed 9-byte window and can never reach the device key beside it, so nothing here
+                    // widens what an ordinary session touches.
+                    if let serial = Whoop4HelloSerial.decode(payload: helloPay) { onStrapSerial?(serial) }
+                    if TestCentre.active(.connection) {
+                        state.append(log: HelloIdentityProbe.report(payload: helloPay,
+                                                                    block: "HELLO_HARVARD(35)",
+                                                                    knownNameOffset: -1)
+                                     + " — locate the strap serial offset (#1303)")
+                    }
                 }
             }
             // #1303: the 5/MG half of the same hunt. The 4.0 aid above is 4.0-only — correctly, since a
@@ -289,6 +346,31 @@ public final class FrameRouter {
                TestCentre.active(.connection),
                let pay = Self.commandResponsePayload(in: frame, family: family) {
                 state.append(log: HelloIdentityProbe.report(payload: pay) + " — locate the strap serial (#1303)")
+            }
+            // The 5/MG battery pack (cmd 151). `BatteryPackInfo` has decoded this reply since its offsets
+            // were captured, and until now nothing sent the command — so the decoder had no caller and the
+            // offsets have never been seen against a live strap.
+            //
+            // LOG-ONLY, deliberately. Those offsets are an unvalidated candidate re-derived from two
+            // frames, and a wrong one does not fail: it renders a confident wrong number. So this reports
+            // what it read AND whether the reading passes the `displayable` sanity check, which is exactly
+            // the evidence needed before a card can honestly show it. Test Centre → Connection gated, so
+            // nothing here reaches a default (shareable) strap log. Persists nothing.
+            if family == .whoop5, let cmd = parsed.cmdName, cmd.hasPrefix("GET_BATTERY_PACK_INFO("),
+               TestCentre.active(.connection) {
+                if let info = BatteryPackInfo.decode(frame: frame) {
+                    let soc = info.socPct.map { String(format: "%.1f%%", $0) } ?? "—"
+                    // logSafe, NOT the raw serial. `redactPii` cannot catch this one — its rules key on a
+                    // literal "WHOOP " prefix or a `whoop-` id, and a bare `serial=BB5AP…` matches neither —
+                    // so the redaction that protects the strap's serial would have let the pack's through to
+                    // an exportable log. Three characters is enough to tell two packs apart, which is all a
+                    // diagnostic needs.
+                    state.append(log: "[pack] present=\(info.present) soc=\(soc) "
+                                 + "serial=\(WhoopSerialIdentity.logSafe(serial: info.serial)) "
+                                 + "displayable=\(info.displayable) (#1303)")
+                } else {
+                    state.append(log: "[pack] cmd 151 replied but did not decode — offsets may have moved")
+                }
             }
             // #900: surface a non-SUCCESS COMMAND_RESPONSE on BOTH families (a result=UNSUPPORTED here is how
             // the MG haptics rejection #48 would show), and — the key part — annotate a reply that DELIVERED
@@ -388,26 +470,26 @@ public final class FrameRouter {
                 } else if ev.hasPrefix("CHARGING_OFF") {
                     state.charging = false
                 }
+                // #1826: BATTERY_PACK_CONNECTED(21) / BATTERY_PACK_REMOVED(22), declared in the shared
+                // schema and handled on neither platform until @Zebsi235 measured them. On a 5/MG they
+                // fire on every attach and detach and LEAD the 7/8 edges above, so the pill responds when
+                // a pack goes on instead of waiting to catch a later edge. A WHOOP 4.0 never sends them.
+                //
+                // NO replay guard here, unlike the Kotlin twin. That is deliberate and not an omission:
+                // this router is live-only — the Backfiller holds no reference to it, so a replayed
+                // offload event never reaches this code, which is the same reason the CHARGING_ON/OFF
+                // branch above carries none. Android's EVENT routing does see replays, and its capture
+                // showed the strap re-sending these edges with byte-identical payloads, so the gate is
+                // load-bearing THERE. Copying it here would guard against something that cannot happen.
+                if ev.hasPrefix("BATTERY_PACK_CONNECTED") {
+                    state.charging = true
+                } else if ev.hasPrefix("BATTERY_PACK_REMOVED") {
+                    state.charging = false
+                }
                 // Physical inputs the strap exposes — live only (this path never sees historical
                 // replay, which goes through the Backfiller). Event strings are "NAME(rawValue)".
                 if ev.hasPrefix("DOUBLE_TAP") {
-                    // The strap also logs this same gesture to its own history, which an in-flight or
-                    // later offload can replay through dispatchLiveGestureIfFresh within
-                    // liveGestureWindowSeconds of THIS delivery — record the ts here too so that replay
-                    // recognizes it as already-dispatched instead of firing onDoubleTap() a second time
-                    // mid-set (prematurely ending an ActiveTrainingController set).
-                    if let ts = parsed.parsed["event_timestamp"]?.intValue, ts > 0 {
-                        lastDoubleTapDispatchTs = max(lastDoubleTapDispatchTs ?? 0, ts)
-                    }
-                    // Fallback for exactly the case above where event_timestamp is missing/zero: THIS
-                    // dispatch can't advance lastDoubleTapDispatchTs, so a later offload replay of the
-                    // same gesture (arriving with a VALID ts) would otherwise still pass `ts >
-                    // (lastDoubleTapDispatchTs ?? 0)` and fire onDoubleTap() a second time. A phone-clock
-                    // timestamp here (checked only against itself below, never mixed into the strap-clock
-                    // comparison above) closes that gap without risking a strap-clock mismatch wrongly
-                    // suppressing a genuinely later gesture.
-                    lastDoubleTapDispatchWallClock = Date()
-                    state.onDoubleTap?()
+                    dispatchDoubleTapOnce(eventTimestamp: parsed.parsed["event_timestamp"]?.intValue)
                 } else if ev.hasPrefix("WRIST_ON") {
                     // Same dual-delivery-path risk DOUBLE_TAP has (see dispatchLiveGestureIfFresh): an
                     // offload can replay a STALE wrist-transition record within liveGestureWindowSeconds
@@ -497,8 +579,14 @@ public final class FrameRouter {
 
     /// Space-separated lowercase hex of a COMMAND_RESPONSE payload, for the raw-hex diagnostic fallback
     /// when a readback payload doesn't decode. nil when the frame carries no payload.
-    nonisolated static func commandResponsePayloadHex(in frame: [UInt8]) -> String? {
-        guard let payload = commandResponsePayload(in: frame), !payload.isEmpty else { return nil }
+    /// #1823: takes `family` because `commandResponsePayload` slices at a family-specific inner offset
+    /// (5/MG 8, 4.0 its own). This wrapper used to drop the argument and always slice at the 4.0 offset,
+    /// so a 5/MG payload came back shifted - the same fixed-offset mistake the REBOOT_STRAP comment
+    /// records, and it would have mis-read the clock payload on the family the clock diagnostic is for.
+    /// Defaulted to `.whoop4` so the existing WHOOP4-gated alarm caller is unchanged.
+    nonisolated static func commandResponsePayloadHex(in frame: [UInt8],
+                                                      family: DeviceFamily = .whoop4) -> String? {
+        guard let payload = commandResponsePayload(in: frame, family: family), !payload.isEmpty else { return nil }
         return payload.map { String(format: "%02x", $0) }.joined(separator: " ")
     }
 
@@ -601,25 +689,15 @@ public final class FrameRouter {
     /// backfill offload (old ts) is ignored, but a real-time one fires even mid-sync.
     static let liveGestureWindowSeconds = 45
 
-    /// event_timestamp of the last DOUBLE_TAP actually dispatched (live handle() or offload replay
-    /// below), whichever fired first — so the SAME physical gesture can't fire onDoubleTap() twice via
-    /// the two separate delivery paths. The strap logs every DOUBLE_TAP to its own history, and an
-    /// offload can replay that record within liveGestureWindowSeconds of the ORIGINAL live delivery, so
-    /// timestamp-freshness alone doesn't distinguish "replay of a gesture already handled" from "genuinely
-    /// new gesture". Reset on every new connection (`family`'s didSet): a real new gesture always has a
-    /// strictly greater event_timestamp than whatever was dispatched before it on the SAME strap
-    /// connection, but that guarantee doesn't hold across a strap swap or an RTC reset.
-    private var lastDoubleTapDispatchTs: Int?
-    /// Phone wall-clock fallback for the same dedup, used only when the live dispatch's own
-    /// event_timestamp was missing/zero (so `lastDoubleTapDispatchTs` above couldn't be advanced) — see
-    /// the live DOUBLE_TAP handler. Compared only against itself (another phone-clock read), never mixed
-    /// with the strap-clock `lastDoubleTapDispatchTs` comparison, so a strap RTC that reads far from phone
-    /// time can't make this wrongly suppress a later, genuinely new gesture.
-    private var lastDoubleTapDispatchWallClock: Date?
-    /// Same dual-delivery-path dedup as `lastDoubleTapDispatchTs`, for WRIST_ON/WRIST_OFF — unlike the
-    /// double-tap case, a wrist transition's own `state.worn` check only rejects an EXACT duplicate of
-    /// the CURRENT state, not a STALE replay arriving after a more recent live transition already
-    /// flipped it (which would otherwise flip `worn` back and re-fire `onWristChange`).
+    /// How far back a DOUBLE_TAP arriving through a sync still earns a log line. Ten minutes covers a
+    /// gym session's syncs; anything older is ordinary history being offloaded, and stays silent.
+    static let lateGestureLogSeconds = 600
+
+    /// Dual-delivery-path dedup for WRIST_ON/WRIST_OFF (double-tap has its own, more thorough version —
+    /// see `dispatchedDoubleTapEventTs` — below). A wrist transition's own `state.worn` check only
+    /// rejects an EXACT duplicate of the CURRENT state, not a STALE replay arriving after a more recent
+    /// live transition already flipped it (which would otherwise flip `worn` back and re-fire
+    /// `onWristChange`).
     private var lastWristEventTs: Int?
 
     /// Parse an EVENT frame and fire ONLY the live physical-gesture handlers (double-tap / wrist) iff the
@@ -644,8 +722,70 @@ public final class FrameRouter {
     func mirrorStrapConsoleIfPresent(frame: [UInt8]) {
         guard frameTypeName(frame, family: family) == "CONSOLE_LOGS" else { return }
         let parsed = parseFrame(frame, family: family)
-        guard parsed.ok, parsed.crcOK != false else { return }
+        // The full verdict, in one step — the frame is parsed right here, so `ok` already covers the
+        // payload CRC32 the second condition used to check separately.
+        guard parsed.ok else { return }
         appendStrapConsole(parsed)
+    }
+
+    /// Count one rejected frame and say something about it exactly once (D3).
+    ///
+    /// Two different visibility rules, on purpose:
+    ///
+    /// - The class where the payload CRC32 VERIFIED while the envelope did not is announced always-on,
+    ///   at its first sighting. It is the class that passed every gate before this change, it is what
+    ///   the hardware run's abort criterion reads, and it costs nothing on a link where it never
+    ///   happens — which is the whole point of leaving rare-event evidence unconditional.
+    /// - The ordinary per-connection detail sits behind the Test Centre's Connection domain, one line
+    ///   per REASON. A resync after a lost notification rejects frames routinely and always has; a line
+    ///   per frame would be noise, and the general per-reason counter is explicitly NOT the abort signal.
+    ///
+    /// Each line reports only what the parse result observed: the reason the verifier gave, and the
+    /// packet type the decoder actually read (a rejected frame keeps it).
+    private func noteRejectedFrame(_ parsed: ParsedFrame) {
+        let hadAdmittedClass = rejectTally.payloadCRCOKButEnvelopeRejected > 0
+        let reason = rejectTally.note(parsed)
+        if !hadAdmittedClass && rejectTally.payloadCRCOKButEnvelopeRejected > 0 {
+            state.append(log: "Frame rejected while its payload CRC32 verified "
+                         + "(reason=\(reason.rawValue), type=\(parsed.typeName), \(parsed.lenBytes) bytes) "
+                         + "— the frame class that reached live state before the integrity gate.")
+        }
+        if TestCentre.active(.connection), loggedRejectReasons.insert(reason).inserted {
+            state.append(log: "frameReject reason=\(reason.rawValue) type=\(parsed.typeName) "
+                         + "bytes=\(parsed.lenBytes)", domain: .connection)
+        }
+    }
+
+    /// Count an OFFLOAD frame's verdict on this connection (D3).
+    ///
+    /// The BLE seam routes a replayed history frame straight to the Backfiller, so `handle(parsed:frame:)`
+    /// — the only caller of `noteRejectedFrame` — never sees it. Without this the tally, and with it the
+    /// ONE counter the hardware run's abort criterion is read from, stays at zero during exactly the
+    /// traffic in which a wrongly-emptied and then acked section is a permanent loss. The verdict is
+    /// formed once at the seam and handed over here; nothing is parsed twice.
+    ///
+    /// The line reports only what the verifier observed. There is no packet type in it because nothing
+    /// decoded one on this path — naming the offload is what this evidence can attribute.
+    func noteOffloadFrameVerdict(_ check: FrameCheck) {
+        let hadAdmittedClass = rejectTally.payloadCRCOKButEnvelopeRejected > 0
+        let reason = rejectTally.note(check)
+        guard reason != .none else { return }
+        if !hadAdmittedClass && rejectTally.payloadCRCOKButEnvelopeRejected > 0 {
+            state.append(log: "Frame rejected while its payload CRC32 verified "
+                         + "(reason=\(reason.rawValue), during a history offload) "
+                         + "— the frame class that reached live state before the integrity gate.")
+        }
+        if TestCentre.active(.connection), loggedRejectReasons.insert(reason).inserted {
+            state.append(log: "frameReject reason=\(reason.rawValue) offload=true", domain: .connection)
+        }
+    }
+
+    /// Fold the reassembler's monotonic below-minimum drop count into this connection's tally, so a byte
+    /// run dropped before any parser saw it still shows up as a rejection with the reason
+    /// "belowMinimumLength" instead of vanishing. Idempotent — only the growth since the last call is
+    /// added, so the BLE seam can call it after every notification.
+    func noteReassemblerDrops(_ monotonicTotal: Int) {
+        rejectTally.absorbReassemblerDrops(monotonicTotal)
     }
 
     /// The one place the strap's own narration reaches the log, so the live and offload paths cannot
@@ -664,26 +804,24 @@ public final class FrameRouter {
         // anyway. Family-aware (WHOOP4 type @[4], 5/MG @[8]).
         guard frameTypeName(frame, family: family) == "EVENT" else { return }
         let parsed = parseFrame(frame, family: family)
-        guard parsed.ok, parsed.crcOK != false else { return }
+        // Same single gate as `handle`: a gesture changes worn state, so it may only come from an
+        // intact frame. `frameTypeName` is a type PEEK and says nothing about integrity.
+        guard parsed.ok else { return }
         guard parsed.typeName == "EVENT", let ev = parsed.parsed["event"]?.stringValue else { return }
         guard let ts = parsed.parsed["event_timestamp"]?.intValue, ts > 0 else { return }   // fail closed
-        guard abs(now - ts) <= FrameRouter.liveGestureWindowSeconds else { return }
-        if ev.hasPrefix("DOUBLE_TAP") {
-            // Freshness alone isn't enough here: an offload can replay the SAME gesture's history
-            // record within the window above, after the live handle() path already dispatched it (see
-            // lastDoubleTapDispatchTs). Only a strictly newer ts is a genuinely new gesture.
-            guard ts > (lastDoubleTapDispatchTs ?? 0) else { return }
-            // Second guard for the case the ts-based one can't see: the live dispatch that handled this
-            // same gesture may have had an invalid event_timestamp of its own, in which case
-            // lastDoubleTapDispatchTs was never advanced for it — reject a replay landing within the
-            // freshness window of ANY recent live dispatch, valid-ts or not (phone-clock comparison only,
-            // see lastDoubleTapDispatchWallClock's doc).
-            if let lastWall = lastDoubleTapDispatchWallClock,
-               Date().timeIntervalSince(lastWall) <= Double(FrameRouter.liveGestureWindowSeconds) {
-                return
+        let age = now - ts
+        guard abs(age) <= FrameRouter.liveGestureWindowSeconds else {
+            // A recent double-tap reaching us through a sync gets a line, so a tap reported as "did not
+            // register" can be checked: a live dispatch leaves "Double-tap → …" at that moment, and a
+            // tap that only ever came through a sync leaves just this. It asserts only the delivery seen.
+            if ev.hasPrefix("DOUBLE_TAP"), age > 0, age <= FrameRouter.lateGestureLogSeconds {
+                state.append(log: "Double-tap (strap time \(ts)) arrived \(age) s late during a sync; "
+                             + "not acted on (live window \(FrameRouter.liveGestureWindowSeconds) s)")
             }
-            lastDoubleTapDispatchTs = ts
-            state.onDoubleTap?()
+            return
+        }
+        if ev.hasPrefix("DOUBLE_TAP") {
+            dispatchDoubleTapOnce(eventTimestamp: ts)
         } else if ev.hasPrefix("WRIST_ON") {
             // Same dual-delivery risk as DOUBLE_TAP: reject a STALE wrist-transition replay that's not
             // strictly newer than the last one actually applied (live or replay) — `!state.worn` alone
@@ -697,5 +835,67 @@ public final class FrameRouter {
             lastWristEventTs = ts
             if state.worn { state.worn = false; state.onWristChange?(false) }
         }
+    }
+
+    // MARK: - Double-tap de-duplication
+
+    /// `event_timestamp`s of the DOUBLE_TAPs recently handed to the app.
+    ///
+    /// ONE physical gesture can reach us TWICE. It arrives live through `handle(frame:)`, and then
+    /// again when the strap offloads its banked event log — `dispatchLiveGestureIfFresh` runs over
+    /// every offload frame and accepts any event whose timestamp is within
+    /// `liveGestureWindowSeconds` (45 s) of now, which a gesture from moments ago obviously is.
+    ///
+    /// `AppModel.handleDoubleTap`'s 1.2 s debounce cannot catch that: the replay can land many
+    /// seconds after the tap, by which time the debounce has long expired. The result is a phantom
+    /// second gesture — and with the Lift Log claiming the double-tap, a phantom gesture silently
+    /// advances the session and costs a logged set.
+    ///
+    /// The event's OWN timestamp is what distinguishes the two cases: one gesture replayed carries
+    /// one timestamp, while two genuine taps carry two. Nil fails OPEN (dispatch), because a real
+    /// gesture must never be swallowed by a missing field.
+    ///
+    /// A SET, not a single slot. Remembering only the last dispatched timestamp suppresses a replay
+    /// solely when the replayed event is the most recent one dispatched, and a real offload does not
+    /// oblige. Interleave two taps and each replay looks new again:
+    ///
+    ///     tap A live -> last = A
+    ///     tap B live -> last = B
+    ///     replay A   -> A != B, dispatches
+    ///     replay B   -> B != A, dispatches
+    ///
+    /// Two phantom advances, and a multi-minute offload that re-walks its banked log repeats the
+    /// whole pattern — three taps measured as twelve in `FrameRouterDoubleTapDedupTests`. That is the
+    /// failure this de-duplication exists to prevent, surviving inside it.
+    ///
+    /// BOUNDED two ways, because this lives on the BLE path for the lifetime of a connection: entries
+    /// outside `liveGestureWindowSeconds` of the incoming event are dropped (past that, the freshness
+    /// guard in `dispatchLiveGestureIfFresh` refuses the replay anyway, so remembering it buys
+    /// nothing), and a hard cap covers a strap whose clock jumps rather than advances.
+    private var dispatchedDoubleTapEventTs: [Int] = []
+
+    /// Far above any plausible number of double-taps inside a 45-second window; a backstop against a
+    /// clock that jumps, not a working limit.
+    private static let dispatchedDoubleTapMemory = 32
+
+    private func dispatchDoubleTapOnce(eventTimestamp ts: Int?) {
+        if let ts {
+            guard !dispatchedDoubleTapEventTs.contains(ts) else {
+                // Only a gesture actually held back leaves a line, so a tap reported as missing can be
+                // told apart from a replay being suppressed.
+                state.append(log: "Double-tap (strap time \(ts)) not dispatched: that event was already handled")
+                return
+            }
+            // Prune BEFORE appending, so the event just accepted is always the one kept.
+            dispatchedDoubleTapEventTs.removeAll {
+                abs(ts - $0) > FrameRouter.liveGestureWindowSeconds
+            }
+            dispatchedDoubleTapEventTs.append(ts)
+            if dispatchedDoubleTapEventTs.count > FrameRouter.dispatchedDoubleTapMemory {
+                dispatchedDoubleTapEventTs.removeFirst(
+                    dispatchedDoubleTapEventTs.count - FrameRouter.dispatchedDoubleTapMemory)
+            }
+        }
+        state.onDoubleTap?()
     }
 }

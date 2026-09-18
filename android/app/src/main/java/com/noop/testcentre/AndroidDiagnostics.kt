@@ -55,6 +55,38 @@ object AndroidDiagnostics {
     }
 
     /**
+     * The history-offload write-health line.
+     *
+     * "Offload:", not "Data write:". The stamp behind it is written ONLY when a backfill session
+     * persists rows, so it says nothing about live streaming - and on a strap that offloads nothing but
+     * streams happily (an unbonded 5/MG, the designed end state of #1635) the old label read as "this
+     * app has stored nothing from your strap" while a hundred thousand HR rows sat under that very
+     * device id. The scope now lives in the label, and the zero case says outright what it excludes.
+     *
+     * Pure and extracted for the same reason [strapProvidesLine] is: [summaryLines] needs a real
+     * Context, and the wording is the part a change would silently break.
+     */
+    internal fun offloadLine(okAtSec: Long, ageMs: Long): String =
+        "Offload:     " + if (okAtSec > 0L) {
+            "rows last landed ${relTime(ageMs)}"
+        } else {
+            "no history rows ever persisted (live HR/R-R are not counted here)"
+        }
+
+    /**
+     * The note that says the funnel did NOT analyse the latest night, and which one it skipped.
+     *
+     * The funnel deliberately walks back to the most recent night carrying skin temperature, because a
+     * night without it reports "skin=0" and teaches nothing. That fallback is right; printing its result
+     * under a heading that says "latest night" is not. On #2012 it reported a night four days older than
+     * the export with no indication, and reading it as the latest night is what a careful reader does.
+     *
+     * Empty when the funnel really did take the newest session, so the common case stays unchanged.
+     */
+    internal fun funnelFallbackNote(chosenDay: String, newestDay: String): String =
+        if (chosenDay == newestDay) "" else " (NOT the latest night: $newestDay carried no skin temperature)"
+
+    /**
      * What the active strap actually delivered over the window — the line that says which scores can
      * exist at all.
      *
@@ -68,15 +100,27 @@ object AndroidDiagnostics {
      * strap simply not worn for two days would be reported as incapable of motion — the opposite kind of
      * wrong from the one this line exists to prevent. Over a window of actual wear, delivered and capable
      * are the same thing; the label keeps that assumption visible instead of implied.
-     * The label is padded to 13 like every other in this block ("Model:", "Data write:"), and the window
+     * The label is padded to 13 like every other in this block ("Model:", "Offload:"), and the window
      * rides the VALUE. "Provides(48h):" is 15 and overhung the column in a report that is aligned by hand
      * and read by eye.
      * Pure so it is unit-tested directly; byte-identical to the Swift twin.
      */
-    internal fun strapProvidesLine(hr: Boolean, rr: Boolean, motion: Boolean, steps: Boolean): String {
+    internal fun strapProvidesLine(
+        hr: Boolean,
+        rr: Boolean,
+        motion: Boolean,
+        steps: Boolean,
+        deviceId: String,
+    ): String {
         fun mark(b: Boolean) = if (b) "yes" else "NO"
+        // The DEVICE rides the value beside the window, for the same reason the window does. This asks
+        // ONE id, the active one, while every scorer reads the union of the active, canonical and
+        // computed ids. Those disagree on a re-added strap, an archived spine, or a Health Connect
+        // import, and the line then reads as "this install has no heart rate" when it means "the active
+        // strap id delivered none". That misreading cost real triage time on #2012, where the header
+        // said HR NO while the same export scored a day off 28,141 samples read through the union.
         return "Provides:    HR ${mark(hr)} · R-R ${mark(rr)} · motion ${mark(motion)} · steps ${mark(steps)}" +
-            " (last 48h)"
+            " ($deviceId, last 48h)"
     }
 
     /**
@@ -144,12 +188,24 @@ object AndroidDiagnostics {
             ) ?: 0L
             val restoreAt = p.getLong("backup.lastRestoreAt", 0L)
             val now = System.currentTimeMillis()
-            add("Data write:  ${if (okAt > 0L) "rows last landed ${relTime(now - okAt * 1000L)}" else "no rows ever persisted"}")
+            // "Offload:", not "Data write:". The stamp behind it is written ONLY when a backfill session
+            // persists rows, so it says nothing about live streaming - and on a strap that offloads
+            // nothing but streams happily (an unbonded 5/MG, the designed end state of #1635) the old
+            // label read as "this app has stored nothing from your strap" while a hundred thousand HR
+            // rows sat under that very device id. The scope now lives in the label, and the zero case
+            // says outright what it does not cover.
+            // Age only means anything when something landed; pass 0 otherwise rather than `now`, which
+            // would be a 56-year "age" sitting unused in an argument a reader has to check is unused.
+            add(offloadLine(okAt, if (okAt > 0L) now - okAt * 1000L else 0L))
             if (stalledAt > 0L && stalledAt >= okAt) {
                 add("             ⚠ history NOT persisting — last offload STALLED ${relTime(now - stalledAt * 1000L)} " +
                     "(if you restored a backup, fully restart the app — #57)")
             }
             if (restoreAt > 0L) add("Last restore: ${relTime(now - restoreAt * 1000L)}")
+            // What the home-screen widgets actually cost. Reported unconditionally, including the "no
+            // pushes" case, because the absence of widget activity is itself the answer to a drain
+            // report — and until this line existed an export could not distinguish the two.
+            add(com.noop.widget.WidgetTelemetry.snapshot(now).render())
             // #1770 follow-up: which streams the ACTIVE strap actually delivered over the last 48 h. Four
             // EXISTS seeks, not counts — see WhoopDao.streamPresence for why that distinction matters on a
             // table holding ~190k motion rows a night.
@@ -165,7 +221,7 @@ object AndroidDiagnostics {
                 val nowSec = now / 1000L
                 val present = com.noop.data.WhoopRepository.from(context)
                     .streamPresence(activeId, nowSec - 48L * 3600L, nowSec)
-                add(strapProvidesLine(present.hr, present.rr, present.gravity, present.steps))
+                add(strapProvidesLine(present.hr, present.rr, present.gravity, present.steps, activeId))
             }
             // #1735: row COUNTS alone cannot separate "Health Connect never brought the ride in" from
             // "it did, but nothing has re-scored since". Both halves of that need a WHEN, and neither had
@@ -247,7 +303,8 @@ object AndroidDiagnostics {
                 add("(no sleep session in the last 14 days to analyze)")
                 return@runCatching
             }
-            var session = recent.last()   // non-null (list checked non-empty), newest by ASC start order
+            val newestSession = recent.last()   // non-null (list checked non-empty), newest by ASC start
+            var session = newestSession
             var skin = repo.skinTempSamples(id, session.startTs, session.endTs, Int.MAX_VALUE)
             if (skin.isEmpty()) {
                 for (s in recent.asReversed()) {
@@ -259,7 +316,11 @@ object AndroidDiagnostics {
             val hr = repo.hrSamplesForDevice(id, session.startTs, session.endTs, Int.MAX_VALUE)
             val rr = repo.rrIntervalsForDevice(id, session.startTs, session.endTs, Int.MAX_VALUE)
             val resp = repo.respSamples(id, session.startTs, session.endTs, Int.MAX_VALUE)
-            add("Night ${dayStamp(session.startTs)}: grav=${grav.size} hr=${hr.size} rr=${rr.size} resp=${resp.size} skin=${skin.size}")
+            add(
+                "Night ${dayStamp(session.startTs)}" +
+                    funnelFallbackNote(dayStamp(session.startTs), dayStamp(newestSession.startTs)) +
+                    ": grav=${grav.size} hr=${hr.size} rr=${rr.size} resp=${resp.size} skin=${skin.size}",
+            )
             if (grav.isEmpty() && hr.isEmpty()) {
                 // #1617 follow-up: do NOT assert "freshly re-added" without testing the other explanation.
                 // Several ids can hold one physical strap's data (#1193/#740), and when the history spine
@@ -361,12 +422,10 @@ object AndroidDiagnostics {
             add("Stored: " + perSource.joinToString("  ") { "${it.first}=${it.second.size}" })
             val latest = perSource.flatMap { it.second }.maxByOrNull { it.startTs }
             add(if (latest != null) "Latest: ${dayStamp(latest.startTs)} · ${latest.sport} (${latest.source})" else "Latest: none")
-            // #1735: "auto-detect is off but workouts keep appearing" is answerable only if the log says
-            // which of the TWO detectors is meant. The Settings toggle governs the opt-in suggestion card
-            // ONLY; the engine derives durable sport="detected" rows on every pass regardless, and all the
-            // per-bout tracing for that sits behind the Test Centre WORKOUTS domain, which a reporter
-            // filing a non-test-mode bug will not have on. Counts read from the store, so this states what
-            // IS, not what the code intends.
+            // #1735/#2187: the Settings toggle governs the opt-in suggestion card, now the only path that
+            // can create a new user-visible automatic workout, and only after Save. The engine may still
+            // analyze bouts to enrich an overlapping real workout, but no longer publishes generic rows.
+            // Counts remain useful because grandfathered sport="detected" history is deliberately retained.
             // Guarded SEPARATELY from the section: this file's contract is that every probe is guarded,
             // and a throw in here would otherwise be caught by the outer handler and reported as
             // "(workout sources unavailable)" - blaming the store for a failure in the auto-detect probe,
@@ -707,21 +766,14 @@ object AndroidDiagnostics {
         else "Scoring:     last pass $ago"
 
     /**
-     * Which workout detector produced what, and whether the Settings toggle has anything to do with it.
-     *
-     * NOOP has TWO detectors and they are deliberately separate (see AutoWorkoutDetector's header). The
-     * Settings toggle governs the opt-in SUGGESTION card, which only ever offers a workout and saves
-     * nothing until the user taps Save. The IntelligenceEngine separately derives durable sport="detected"
-     * rows from the 1 Hz store on every scoring pass, and that has never been gated by the toggle.
-     *
-     * Both are called "detect" in the UI, so #1735 read the second one's rows as the first one ignoring
-     * its own switch, which is an entirely reasonable reading. Every per-bout line that would have shown
-     * the difference sits behind the Test Centre WORKOUTS domain, and that report was filed as "not a
-     * test-mode bug" with the domain off, so the log carried nothing about it at all.
+     * Whether automatic workout suggestions are enabled and how much grandfathered detected history is
+     * still stored. The suggestion card is the only path that can create a new user-visible automatic
+     * workout, and it saves nothing until the user confirms. IntelligenceEngine still analyzes bouts for
+     * daily analytics and overlap enrichment, but never publishes or reconciles generic workout rows.
      *
      * Reads COUNTS from the store rather than describing intent: it states what is on disk, not what the
-     * code believes it does. The reassurance clause is emitted only for the combination that actually
-     * misleads (card off, rows present) so it never claims to explain a state it is not looking at.
+     * code believes it does. The retained-history clause is emitted only when the card is off and legacy
+     * rows remain, making clear that disabling stops future suggestions without destructively erasing them.
      * [dismissedMarkers] is null when the query failed, and renders "n/a" rather than a wrong zero, which
      * would read as "your dismissals are not sticking".
      */
@@ -733,12 +785,12 @@ object AndroidDiagnostics {
         val card = if (suggestionCardEnabled) "on" else "off"
         val dismissed = dismissedMarkers?.toString() ?: "n/a"
         val note = if (!suggestionCardEnabled && storedDetectedRows > 0) {
-            " (rows with the card off are EXPECTED: a different detector makes them)"
+            " (stored rows are retained legacy history; disabling does not delete them)"
         } else {
             ""
         }
-        return "Auto-detect: suggestion card=$card · engine \"Activity\" rows=always on, not gated by " +
-            "that toggle · stored detected=$storedDetectedRows · dismissed markers=$dismissed$note"
+        return "Auto-detect: suggestion card=$card · new workouts=confirmation only; analytics does not " +
+            "publish generic rows · stored legacy detected=$storedDetectedRows · dismissed markers=$dismissed$note"
     }
 
     /** A coarse OEM-kill heuristic by manufacturer (the aggressive-background-kill vendors). Pure and

@@ -131,6 +131,10 @@ internal fun buildSleepModel(
     // Today's logical-day key, the anchor for each tile's staleness bound (see [metric]). Injectable so
     // tests can pin the clock instead of depending on the day they happen to run.
     todayKey: String = logicalDayKeyNow(),
+    // #1821: the reader's chosen clock. Defaults to 24h, which is what every one of these labels was
+    // hardcoded to before the setting existed, so tests and any caller not yet updated keep their old
+    // output rather than silently flipping.
+    is24h: Boolean = true,
 ): SleepModel? {
     val effectiveDay = selectedDay ?: days.lastOrNull()?.day ?: return null
     // The HERO night = the selected day's stage-bearing row. The TILE / debt / need / trend
@@ -213,7 +217,7 @@ internal fun buildSleepModel(
         val lastDay = days.lastOrNull()?.day
         if (lastDay != null && imported.consistency[lastDay] != null) {
             val series = days.mapNotNull { imported.consistency[it.day] }
-            Metric(series.lastOrNull(), mean(series), series)
+            Metric(series.lastOrNull(), null, mean(series), series)
         } else {
             consistencySeries(sessions)
         }
@@ -236,7 +240,7 @@ internal fun buildSleepModel(
     ).toMap()
     val sleepDebt = run {
         val series = days.mapNotNull { localDebtByDay[it.day] }
-        Metric(series.lastOrNull(), mean(series), series)
+        Metric(series.lastOrNull(), null, mean(series), series)
     }
 
     // Trend set = the most-recent nights with data (asleep totals, full history — latest-anchored,
@@ -279,7 +283,7 @@ internal fun buildSleepModel(
 
     return SleepModel(
         stages = stages,
-        clockLabel = clockLabel(latest, session),
+        clockLabel = clockLabel(latest, session, is24h),
         efficiencyText = efficiency.latest?.let { "${it.roundToInt()}%" } ?: "—",
         performance = performance,
         efficiency = efficiency,
@@ -316,12 +320,13 @@ internal fun fallbackSleepModel(
     napSleepMinByDay: Map<String, Double> = emptyMap(),
     sessions: List<SleepSession> = emptyList(),
     todayKey: String = logicalDayKeyNow(),
+    is24h: Boolean = true,   // #1821, threaded to the hero's clock label
 ): SleepModel? {
     val anchorDay = days.lastOrNull {
         (it.deepMin ?: 0.0) + (it.remMin ?: 0.0) + (it.lightMin ?: 0.0) > 0.0
     }?.day ?: return null
     return buildSleepModel(days, null, imported, selectedDay = anchorDay,
-        napSleepMinByDay = napSleepMinByDay, sessions = sessions, todayKey = todayKey)
+        napSleepMinByDay = napSleepMinByDay, sessions = sessions, todayKey = todayKey, is24h = is24h)
 }
 
 /**
@@ -393,7 +398,11 @@ private fun metric(
         transform(d)?.takeIf { it.isFinite() }?.let { d.day to it }
     }
     val series = points.map { it.second }
-    return Metric(Baselines.freshestCarried(points, todayKey)?.second, mean(series), series)
+    val fresh = Baselines.freshestCarried(points, todayKey)
+    // #1946: track the day the carried value came from so the tile can stamp it. null when there is
+    // no carried value, or when the carried value IS today's own (no stamp needed for today's read).
+    val latestDay = if (fresh != null && fresh.first != todayKey) fresh.first else null
+    return Metric(fresh?.second, latestDay, mean(series), series)
 }
 
 /**
@@ -416,7 +425,7 @@ internal fun consistencySeries(sessions: List<SleepSession>): Metric {
         return m
     }
     val mins = sessions.sortedBy { it.startTs }.map { bedMinutes(it.effectiveStartTs) }
-    if (mins.size < 3) return Metric(null, null, emptyList())
+    if (mins.size < 3) return Metric(null, null, null, emptyList())
     val scores = ArrayList<Double>()
     for (i in mins.indices) {
         val lo = max(0, i - 13)
@@ -428,7 +437,7 @@ internal fun consistencySeries(sessions: List<SleepSession>): Metric {
         // 120 min of onset SD maps to a 0 score; tighter routines climb to 100.
         scores.add((100.0 * (1.0 - sd / 120.0)).coerceIn(0.0, 100.0))
     }
-    return Metric(scores.lastOrNull(), mean(scores), scores)
+    return Metric(scores.lastOrNull(), null, mean(scores), scores)
 }
 
 private fun mean(vals: List<Double>): Double? = if (vals.isEmpty()) null else vals.sum() / vals.size

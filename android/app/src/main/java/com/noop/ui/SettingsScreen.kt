@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BatteryStd
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Brightness6
+import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Download
@@ -86,6 +87,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -120,6 +122,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.BuildConfig
 import com.noop.analytics.Baselines
+import com.noop.analytics.DayCycleMode
 import com.noop.analytics.HrZoneSet
 import com.noop.analytics.HrZones
 import com.noop.analytics.UserProfile
@@ -139,7 +142,9 @@ import com.noop.update.UpdateCheck
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
+import com.noop.analytics.ClockFormatPreference
 
 // MARK: - Settings (ported from Strand/Screens/SettingsView.swift)
 //
@@ -301,6 +306,19 @@ class ProfileStore(private val prefs: SharedPreferences) {
      *  null when 0 (auto-fit), the positive value otherwise. */
     val stepsManualOverride: Double? get() = stepsManualCoefficient.takeIf { it > 0 }
 
+    /**
+     * #1816: true when the strap has banked ANY motion (gravity samples → `dayMotionIntensity > 0`)
+     * in the calibration scan window. Written by the analytics engine on every pass so it tracks a
+     * fresh strap's first sync without a separate query. The Today tile reads this to decide whether
+     * "Need N more days where your phone also counted steps" is the honest caption or a lie: a step
+     * estimate is `motion * coefficient`, so with the motion half missing neither the estimate nor the
+     * fit moves however many phone-counted days the user collects. The caption that names only the
+     * phone half is actively misleading. Twin of the Swift `ProfileStore.stepsHasBankedMotion`.
+     */
+    var stepsHasBankedMotion: Boolean
+        get() = prefs.getBoolean(KEY_STEPS_HAS_MOTION, false)
+        set(v) = prefs.edit().putBoolean(KEY_STEPS_HAS_MOTION, v).apply()
+
     /** The auto (Tanaka) HR-max for the current age. */
     val hrMaxAuto: Int get() = Zones.hrMaxTanaka(age)
 
@@ -418,6 +436,7 @@ class ProfileStore(private val prefs: SharedPreferences) {
         private const val KEY_STEPS_CONFIDENCE = "steps_calibration_confidence"
         private const val KEY_STEPS_MANUAL_FLAG = "steps_calibration_manual"
         private const val KEY_STEPS_MANUAL_COEFF = "steps_manual_coefficient"
+        private const val KEY_STEPS_HAS_MOTION = "steps_has_banked_motion"
 
         private const val AGE_MIN = 13
         private const val AGE_MAX = 100
@@ -519,6 +538,16 @@ fun SettingsScreen(
     }
 
     var backupBusy by remember { mutableStateOf(false) }
+    /**
+     * #1807: a restore refused ONLY for size, held with the uri that produced it so confirming can
+     * retry the SAME file. Android keeps a usable uri across the dialog, so unlike Apple there is no
+     * need to send the user back through the picker.
+     */
+    var oversizeRestore by remember { mutableStateOf<Pair<android.net.Uri, String>?>(null) }
+    // #1014 family: a failed import/export ends on a multi-sentence message whose LAST clause is the
+    // part the reader can act on. A Toast truncated it, so what survived was the SQLite banner and
+    // nothing else. Held here and shown in a dialog instead.
+    var backupFailure by remember { mutableStateOf<String?>(null) }
 
     // #646/#651: LogExport's zip build + file read now run on Dispatchers.IO instead of blocking the
     // caller, so these buttons no longer freeze the UI — but nothing else stopped a second tap mid-export
@@ -557,6 +586,12 @@ fun SettingsScreen(
     // that feeds Charge from tonight onward; the standing analyze loop picks it up on its next pass.
     // Fixes a baseline poisoned by a bad first week (worn sick, or early nights that anchored too high).
     var showRecalibrateConfirm by remember { mutableStateOf(false) }
+
+    // Steps-estimate calibration screen (WHOOP 4.0), reached from the Profile card's "Steps estimate"
+    // tap-through. Mirrors the macOS StepsCalibrationSheet: honest explainer + current fit + a recent
+    // estimated-vs-phone table + a manual coefficient override. Full-screen Dialog like the guide above.
+    var showStepsCalibration by remember { mutableStateOf(false) }
+    var dayCycleMode by remember { mutableStateOf(NoopPrefs.dayCycleMode(context)) }
 
     // Whether the "Advanced" disclosure (experimental probes, diagnostics, raw-sensor export, Trends
     // report) is expanded. Default FALSE so a first-run user lands on the everyday sections instead of
@@ -655,14 +690,20 @@ fun SettingsScreen(
     // BETA feature flag, default ON (`live_sessions_beta`, see LiveSessionPrefs); off hides the entry.
     var liveSessionsBeta by remember { mutableStateOf(LiveSessionPrefs.enabled(context)) }
 
-    // Imperial/Metric display preference (D#103). Display-only — stored data stays SI. The system drives
-    // the profile fields below (imperial entry) too, so it's local state the whole screen reads.
-    // `temperatureRaw` is "" (match the system) or a TemperatureUnit raw value. SharedPreferences isn't
-    // reactive, so these mirror into local state like the toggles above.
+    // Display preferences. The original system remains the body choice; exercise distance/pace has an
+    // independent override. SharedPreferences isn't reactive, so both mirror into local state.
     var unitSystem by remember { mutableStateOf(UnitPrefs.system(context)) }
+    var distanceSystemRaw by remember {
+        mutableStateOf(NoopPrefs.of(context).getString(NoopPrefs.KEY_DISTANCE_UNIT_SYSTEM, "") ?: "")
+    }
+    val distanceUnitSystem = UnitPrefs.resolveDistance(unitSystem, distanceSystemRaw)
+    var clockFormat by remember { mutableStateOf(ClockPrefs.preference(context)) }   // #1821
     var temperatureRaw by remember {
         mutableStateOf(NoopPrefs.of(context).getString(NoopPrefs.KEY_TEMPERATURE_UNIT, "") ?: "")
     }
+    // #1846: which skin-temp number the cards lead with. Display-only, like the row above — the stored
+    // value never changes, so flipping it just re-reads the same night on the other scale.
+    var skinTempKind by remember { mutableStateOf(UnitPrefs.skinTempPreferred(context)) }
     // Effort display scale (#268) — show NOOP's native 0–100 Effort or WHOOP's 0–21 Day Strain axis.
     // Display-only; the stored value never changes. Mirrors into local state like the toggles above.
     var effortScale by remember { mutableStateOf(UnitPrefs.effortScale(context)) }
@@ -713,15 +754,24 @@ fun SettingsScreen(
             }
             backupBusy = false
             result.fold(
-                onSuccess = {
-                    Toast.makeText(
-                        context,
-                        "Backup exported. Copy this file to your new phone and use Import there to restore everything.",
-                        Toast.LENGTH_LONG,
-                    ).show()
+                onSuccess = { outcome ->
+                    // #1807: the file is written and valid either way. When the database is past the
+                    // ceiling the RESTORE path enforces, say so NOW — the alternative is finding out
+                    // during a restore, which is the one moment the original is gone. The second
+                    // sentence is the refusal's own wording, reused so this adds no untranslated copy.
+                    val note = if (outcome.overRestoreCeiling) {
+                        "Backup exported. The backup archive is too large to restore safely — " +
+                            "restoring it will ask you to confirm."
+                    } else {
+                        "Backup exported. Copy this file to your new phone and use Import there to restore everything."
+                    }
+                    Toast.makeText(context, note, Toast.LENGTH_LONG).show()
                 },
                 onFailure = { e ->
-                    Toast.makeText(context, "Backup problem: ${e.message}", Toast.LENGTH_LONG).show()
+                    // The EXPORT-side integrity refusal lands here (#1014): a corrupt store is caught
+                    // before it is archived, and the message names the CSV route that still works. That
+                    // is a next step, so it needs the dialog for the same reason the import failures do.
+                    backupFailure = "Backup problem: ${e.message}"
                 },
             )
         }
@@ -769,9 +819,12 @@ fun SettingsScreen(
                     "Backup imported. Fully close and reopen NOOP for it to take effect.",
                     Toast.LENGTH_LONG,
                 ).show()
-                is DataBackup.ImportResult.Failed -> Toast.makeText(
-                    context, result.message, Toast.LENGTH_LONG,
-                ).show()
+                is DataBackup.ImportResult.Failed -> backupFailure = result.message
+                // #1807: refused ONLY for size, which is recoverable — offer to go ahead rather than
+                // ending on a Toast the user can do nothing about. The cap is a decompression guard
+                // against a hostile archive; a backup they just picked out of their own files is not
+                // that threat, and refusing outright strands real history.
+                is DataBackup.ImportResult.TooLarge -> oversizeRestore = uri to result.message
             }
         }
     }
@@ -1157,17 +1210,48 @@ fun SettingsScreen(
             }
         }
 
+        // --- Daily cycle ---
+        SettingsCard(
+            icon = Icons.Filled.Autorenew,
+            title = uiString(R.string.settings_day_cycle_title),
+            blurb = uiString(R.string.settings_day_cycle_description),
+        ) {
+            Column {
+                SettingsFormRow(label = uiString(R.string.settings_day_cycle_starts)) {
+                    SegmentedPillControl(
+                        items = listOf(DayCycleMode.SLEEP_ONSET, DayCycleMode.MIDNIGHT),
+                        selection = dayCycleMode,
+                        label = {
+                            if (it == DayCycleMode.SLEEP_ONSET) uiString(R.string.settings_day_cycle_sleep)
+                            else uiString(R.string.settings_day_cycle_midnight)
+                        },
+                        onSelect = {
+                            dayCycleMode = it
+                            vm.setDayCycleMode(it)
+                        },
+                    )
+                }
+                Text(
+                    text = if (dayCycleMode == DayCycleMode.SLEEP_ONSET) {
+                        uiString(R.string.settings_day_cycle_sleep_description)
+                    } else {
+                        uiString(R.string.settings_day_cycle_midnight_description)
+                    },
+                    style = NoopType.footnote,
+                    color = Palette.textTertiary,
+                )
+            }
+        }
+
         // --- Units ---
-        // Imperial/Metric display toggle + a separate temperature override. Display-only — nothing
-        // stored changes; NOOP keeps everything in SI and converts at the point of display. Mirrors the
-        // macOS Settings → Units card.
+        // Independent body and exercise-distance choices plus temperature/effort overrides. Display-only.
         SettingsCard(
             icon = Icons.Filled.Straighten,
             title = uiString(R.string.l10n_settings_screen_units_12748281),
-            blurb = "Choose how distances, weights, heights, temperatures and Effort are shown. Your data is always stored the same way. This only changes the display.",
+            blurb = uiString(R.string.units_settings_blurb),
         ) {
             Column {
-                SettingsFormRow(label = uiString(R.string.l10n_settings_screen_measurement_system_701d765d)) {
+                SettingsFormRow(label = uiString(R.string.units_body_measurements)) {
                     SegmentedPillControl(
                         items = listOf(UnitSystem.METRIC, UnitSystem.IMPERIAL),
                         selection = unitSystem,
@@ -1179,9 +1263,23 @@ fun SettingsScreen(
                     )
                 }
                 SettingsRowDivider()
+                SettingsFormRow(label = uiString(R.string.units_exercise_distance_pace)) {
+                    SegmentedPillControl(
+                        items = listOf(UnitSystem.METRIC, UnitSystem.IMPERIAL),
+                        selection = distanceUnitSystem,
+                        label = {
+                            if (it == UnitSystem.METRIC) uiString(R.string.units_kilometres)
+                            else uiString(R.string.units_miles)
+                        },
+                        onSelect = {
+                            distanceSystemRaw = it.raw
+                            NoopPrefs.setDistanceUnitSystem(context, it)
+                        },
+                    )
+                }
+                SettingsRowDivider()
                 SettingsFormRow(label = uiString(R.string.l10n_settings_screen_temperature_0a9062a9)) {
-                    // Three-way: "Match" follows the system above; °C / °F pin it explicitly. Stored as an
-                    // empty string ("match") or the TemperatureUnit raw value.
+                    // Three-way: the default follows body measurements; °C / °F pin it explicitly.
                     SegmentedPillControl(
                         items = listOf("", TemperatureUnit.CELSIUS.raw, TemperatureUnit.FAHRENHEIT.raw),
                         selection = temperatureRaw,
@@ -1189,12 +1287,36 @@ fun SettingsScreen(
                             when (it) {
                                 TemperatureUnit.CELSIUS.raw -> "°C"
                                 TemperatureUnit.FAHRENHEIT.raw -> "°F"
-                                else -> "Match"
+                                else -> uiString(R.string.units_follow_body)
                             }
                         },
                         onSelect = {
                             temperatureRaw = it
                             NoopPrefs.setTemperatureUnit(context, TemperatureUnit.fromRaw(it))
+                        },
+                    )
+                }
+                SettingsRowDivider()
+                SettingsFormRow(label = uiString(R.string.l10n_settings_screen_skin_temperature_fc103030)) {
+                    // #1846: lead with a temperature ("33.5 °C") or with the move from your own baseline
+                    // ("-0.1 Δ°C"). Only a PREFERENCE — a night that measured just one of the two still
+                    // shows that one, so the choice can never blank a card.
+                    SegmentedPillControl(
+                        items = listOf(
+                            com.noop.analytics.SkinTempDisplay.Kind.ABSOLUTE,
+                            com.noop.analytics.SkinTempDisplay.Kind.DEVIATION,
+                        ),
+                        selection = skinTempKind,
+                        label = {
+                            if (it == com.noop.analytics.SkinTempDisplay.Kind.ABSOLUTE) {
+                                uiString(R.string.l10n_settings_screen_temperature_0a9062a9)
+                            } else {
+                                uiString(R.string.skin_temp_vs_baseline)
+                            }
+                        },
+                        onSelect = {
+                            skinTempKind = it
+                            NoopPrefs.setSkinTempDisplay(context, it)
                         },
                     )
                 }
@@ -1285,6 +1407,33 @@ fun SettingsScreen(
                             AppLanguagePrefs.set(context, selected)
                             context.hostingActivity()?.recreate()
                         }
+                    },
+                )
+            }
+            SettingsRowDivider()
+            // #1821: Clock format. Sits with Language because it is an app-owned display CONVENTION, and
+            // like Language it offers "System default" - which here means the device's own 12/24h switch,
+            // not the region default that was silently deciding this for everyone. Twin of the Apple row.
+            SettingsFormRow(label = uiString(R.string.l10n_settings_screen_clock_04f6b3ea)) {
+                SegmentedPillControl(
+                    items = listOf(
+                        ClockFormatPreference.SYSTEM,
+                        ClockFormatPreference.TWELVE_HOUR,
+                        ClockFormatPreference.TWENTY_FOUR_HOUR,
+                    ),
+                    selection = clockFormat,
+                    label = {
+                        when (it) {
+                            ClockFormatPreference.TWELVE_HOUR ->
+                                uiString(R.string.l10n_settings_screen_12_hour_41c18ba0)
+                            ClockFormatPreference.TWENTY_FOUR_HOUR ->
+                                uiString(R.string.l10n_settings_screen_24_hour_18e86819)
+                            else -> uiString(R.string.settings_language_system)
+                        }
+                    },
+                    onSelect = {
+                        clockFormat = it
+                        ClockPrefs.setPreference(context, it)
                     },
                 )
             }
@@ -1593,6 +1742,123 @@ fun SettingsScreen(
             }
         }
 
+        // The bar's own card. These four options are all about one piece of app-shell chrome, and living
+        // among the theme controls in Appearance meant two of them sat between unrelated rows while the
+        // other two had nowhere to go. Grouped, the size and transparency read as what they are: choices
+        // about the same bar the toggles above them move and hide.
+        SettingsCard(
+            icon = Icons.Filled.ViewAgenda,
+            title = uiString(R.string.l10n_settings_screen_bottom_bar_f84098a9),
+            blurb = uiString(R.string.l10n_settings_screen_how_the_navigation_bar_looks_f186b099),
+        ) {
+            // The Coach tab's master switch. It sits in this section because the tab is where a wearer
+            // meets the feature, but it is NOT tab chrome: switching it off disables the AI itself, takes
+            // the Today launcher card with it, and cancels the daily brief (which otherwise keeps calling
+            // a provider from the background and posting notifications, with no UI attached to reveal that
+            // it is still running). The saved provider key is kept, so this is a flip and not a re-setup.
+            SettingsFormRow(label = uiString(R.string.l10n_settings_screen_ai_coach_130c3eab)) {
+                Switch(
+                    checked = BottomBarStyleStore.coachEnabled,
+                    onCheckedChange = { BottomBarStyleStore.setCoachEnabled(context, it) },
+                )
+            }
+            SettingsRowDivider()
+            // #1836: which bottom-bar layout to draw. Default OFF — the shipped reserved slot. The
+            // overlay lets a screen's own backdrop show through the bar's glass, which is what it was
+            // built for, but it is app-shell layout no test can judge, so it ships switchable.
+            SettingsFormRow(label = uiString(R.string.l10n_settings_screen_bottom_bar_overlay_f257c96f)) {
+                Switch(
+                    checked = BottomBarStyleStore.overlay,
+                    onCheckedChange = { BottomBarStyleStore.set(context, it) },
+                )
+            }
+            SettingsRowDivider()
+            // #1839: hide the bar while scrolling down, bring it back on scrolling up. Only does anything
+            // with the overlay on, because in the slot layout the space is reserved and hiding the bar
+            // would leave an empty band — so the row is disabled rather than silently inert.
+            // Reduce Motion pins the bar visible (a bar that vanishes without animation reads as a
+            // glitch), so with it on the toggle would flip and change nothing. A switch that silently
+            // does nothing is worse than one that is plainly unavailable, so it greys out for the same
+            // reason it does without the overlay.
+            val autoHideAvailable = BottomBarStyleStore.overlay && !rememberReduceMotion()
+            SettingsFormRow(label = uiString(R.string.l10n_settings_screen_hide_bar_when_scrolling_b077d9f3)) {
+                Switch(
+                    checked = BottomBarStyleStore.autoHide,
+                    enabled = autoHideAvailable,
+                    onCheckedChange = { BottomBarStyleStore.setAutoHide(context, it) },
+                )
+            }
+            // Reaching either control below means scrolling DOWN, which auto-hide reads as "hide the
+            // bar" - so a change made here landed on a bar the user could not see, and neither a slider
+            // drag nor a menu pick is a scroll, so nothing brought it back.
+            //
+            // Keyed on what the bar LOOKS like rather than on either control, so one rule covers both: a
+            // drag restarts this every frame and stays pinned throughout, a menu pick fires it once, and
+            // either way the bar is held a moment longer so the result is visible after the finger lifts.
+            LaunchedEffect(BottomBarStyleStore.scale, BottomBarStyleStore.opacityStep) {
+                BottomBarStyleStore.pinPreview(true)
+                delay(1_500)
+                BottomBarStyleStore.pinPreview(false)
+            }
+            SettingsRowDivider()
+            // Size. A dropdown of fixed multipliers rather than a slider: these are the sizes worth
+            // having, and a continuous control here mostly produces sizes a user cannot tell apart.
+            var sizeMenuOpen by remember { mutableStateOf(false) }
+            SettingsFormRow(label = uiString(R.string.l10n_settings_screen_bar_size_2304bfbb)) {
+                Box {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .clickable { sizeMenuOpen = true }
+                            .background(Palette.surfaceInset)
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(scaleLabel(BottomBarStyleStore.scale), style = NoopType.subhead,
+                             color = Palette.textPrimary)
+                        Icon(Icons.Filled.ArrowDropDown, contentDescription = null,
+                             tint = Palette.textSecondary)
+                    }
+                    DropdownMenu(expanded = sizeMenuOpen, onDismissRequest = { sizeMenuOpen = false }) {
+                        BOTTOM_BAR_SCALES.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(scaleLabel(option), color = Palette.textPrimary) },
+                                onClick = {
+                                    sizeMenuOpen = false
+                                    BottomBarStyleStore.setScale(context, option)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+            SettingsRowDivider()
+            // Transparency, in the eight steps the store defines. The slider writes on every change so the
+            // bar updates live underneath the sheet - the whole point is seeing it against your own screen.
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(uiString(R.string.l10n_settings_screen_bar_transparency_3f648fbb), style = NoopType.subhead, color = Palette.textPrimary)
+                Text(uiString(R.string.l10n_settings_screen_how_see_through_the_bar_is_ddb0c208), style = NoopType.footnote, color = Palette.textTertiary)
+                Slider(
+                    value = BottomBarStyleStore.opacityStep.toFloat(),
+                    // Live while dragging, persisted once on release: a drag emits a value per frame, and
+                    // writing each one records a decision the user makes once. Rounded, not truncated -
+                    // the snapped value can arrive as 5.9999998, which truncation would read as step 5.
+                    onValueChange = { BottomBarStyleStore.previewOpacityStep(it.roundToInt()) },
+                    onValueChangeFinished = {
+                        BottomBarStyleStore.setOpacityStep(context, BottomBarStyleStore.opacityStep)
+                    },
+                    valueRange = MIN_OPACITY_STEP.toFloat()..MAX_OPACITY_STEP.toFloat(),
+                    // Compose counts the stops BETWEEN the ends, so N notches is N-2. Derived, not
+                    // written out, so changing the notch count cannot leave this line disagreeing with it.
+                    steps = MAX_OPACITY_STEP - MIN_OPACITY_STEP - 1,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Palette.accent,
+                        activeTrackColor = Palette.accent,
+                    ),
+                )
+            }
+        }
         // --- Background image (#custom-background) ---
         // An optional custom photo drawn full-bleed behind EVERY tab (including More), in place of the
         // day-cycle sky (precedence: image > sky > flat canvas). Pick from Photos or Browse the files; the
@@ -1768,7 +2034,7 @@ fun SettingsScreen(
                         Text(uiString(R.string.l10n_settings_screen_strap_name_350de547), style = NoopType.subhead, color = Palette.textPrimary)
                         Text(
                             uiString(R.string.l10n_settings_screen_rename_your_strap_s_bluetooth_name_6032668b) +
-                                "reboots to apply, then reconnects with the new name.",
+                                " reboots to apply, then reconnects with the new name.",
                             style = NoopType.footnote,
                             color = Palette.textTertiary,
                         )
@@ -2089,7 +2355,7 @@ fun SettingsScreen(
                             )
                             Text(
                                 uiString(R.string.l10n_settings_screen_runs_the_continuous_hrv_stream_only_3fed47c5) +
-                                "Note: continuous background HRV capture (including daytime naps) is paused outside this window. " +
+                                " Note: continuous background HRV capture (including daytime naps) is paused outside this window. " +
                                 "For on-demand daytime HRV readings (including naps), use the \"Take an HRV reading\" button on the Live screen.",
                                 style = NoopType.footnote,
                                 color = Palette.textTertiary,
@@ -2681,7 +2947,7 @@ fun SettingsScreen(
                 }
                 Text(
                     uiString(R.string.l10n_settings_screen_a_transparent_cardiorespiratory_recipe_that_recovers_eebe00c2) +
-                        "V1 staging, and is now the default. It only changes how already-detected nights are " +
+                        " V1 staging, and is now the default. It only changes how already-detected nights are " +
                         "split into stages (detection and scores are unchanged); turn it off to fall back to " +
                         "V1. Takes effect on the next nights staged.",
                     style = NoopType.caption,
@@ -2720,7 +2986,7 @@ fun SettingsScreen(
                 }
                 Text(
                     uiString(R.string.l10n_settings_screen_reviews_each_scored_wake_block_for_537924ea) +
-                        "change in body position) instead of just a heart-rate rise. A wake block with no " +
+                        " change in body position) instead of just a heart-rate rise. A wake block with no " +
                         "locomotion and a stable posture -- a hot night, a brief turn-over -- is folded back " +
                         "into light sleep; a real get-up is left alone. Self-checks how much motion detail " +
                         "your strap actually recorded and stays off on a night that's too sparse to trust " +
@@ -2849,7 +3115,9 @@ fun SettingsScreen(
                     kind = NoopButtonKind.Secondary,
                     fullWidth = true,
                     onClick = {
-                        vm.ble.buzzTimeNow(is24h = android.text.format.DateFormat.is24HourFormat(context))
+                        // #1821: buzzTimeNow's doc asked for "a Settings toggle" to supply this.
+                        // Now there is one, so the pulses read the clock the user chose.
+                        vm.ble.buzzTimeNow(is24h = ClockPrefs.uses24Hour(context))
                     },
                 )
                 Text(
@@ -2929,7 +3197,7 @@ fun SettingsScreen(
                 SettingsRowDivider()
                 SettingsToggleRow(
                     title = uiString(R.string.l10n_settings_screen_auto_detect_workouts_bed4cf2a),
-                    detail = "After a sync, NOOP looks over your recent heart rate for a sustained, raised stretch that looks like exercise and offers to save it. It only ever suggests. Nothing is saved until you tap Save, and you can dismiss any suggestion. Deliberately conservative, so the odd workout may be missed. On this phone only.",
+                    detail = "After a sync, NOOP looks over your recent heart rate for a sustained, raised stretch that looks like exercise and offers to save it. It only ever suggests. Nothing is saved until you tap Save, and you can dismiss any suggestion. Turning this off stops future suggestions; workouts already in your history remain. Deliberately conservative, so the odd workout may be missed. On this phone only.",
                     checked = autoDetectWorkouts,
                     onCheckedChange = {
                         autoDetectWorkouts = it
@@ -3069,6 +3337,58 @@ fun SettingsScreen(
                     onClick = { showRecalibrateConfirm = true },
                 )
             }
+        }
+
+        backupFailure?.let { failure ->
+            BackupFailureDialog(message = failure, onDismiss = { backupFailure = null })
+        }
+
+        oversizeRestore?.let { (pendingUri, pendingMessage) ->
+            AlertDialog(
+                onDismissRequest = { oversizeRestore = null },
+                containerColor = Palette.surfaceOverlay,
+                // The message is the sentence the refusal already carried — reused rather than replaced,
+                // so surfacing the override adds no untranslated copy. Buttons reuse existing keys.
+                text = {
+                    Text(pendingMessage, style = NoopType.subhead, color = Palette.textSecondary)
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        oversizeRestore = null
+                        backupBusy = true
+                        scope.launch {
+                            val again = withContext(Dispatchers.IO) {
+                                DataBackup.importFrom(context, pendingUri, allowOversize = true)
+                            }
+                            backupBusy = false
+                            when (again) {
+                                is DataBackup.ImportResult.NeedsRestart -> Toast.makeText(
+                                    context,
+                                    "Backup imported. Fully close and reopen NOOP for it to take effect.",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                                // Same reason as the first attempt: these carry a next step, and a Toast
+                                // is where a next step goes to be truncated.
+                                is DataBackup.ImportResult.Failed -> backupFailure = again.message
+                                is DataBackup.ImportResult.TooLarge -> backupFailure = again.message
+                            }
+                        }
+                    }) {
+                        Text(
+                            uiString(R.string.l10n_settings_screen_restore_3cbe6d6b),
+                            color = Palette.accent,
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { oversizeRestore = null }) {
+                        Text(
+                            uiString(R.string.l10n_settings_screen_cancel_77dfd213),
+                            color = Palette.textSecondary,
+                        )
+                    }
+                },
+            )
         }
 
         // #174: the switch going OFF is the moment to offer the undo. Declining leaves the flags set and
@@ -3215,7 +3535,7 @@ fun SettingsScreen(
                     icon = Icons.Filled.Info,
                     iconTint = Palette.textTertiary,
                     text = uiString(R.string.l10n_settings_screen_importing_overwrites_everything_currently_on_this_297b76ae) +
-                        "Export CSV writes a WHOOP-format zip of your days, sleeps, workouts and journal that re-imports into NOOP on Android or Mac. On-device computed rows are marked APPROXIMATE in its Source column; the .noopbak backup stays the lossless restore path.",
+                        " Export CSV writes a WHOOP-format zip of your days, sleeps, workouts and journal that re-imports into NOOP on Android or Mac. On-device computed rows are marked APPROXIMATE in its Source column; the .noopbak backup stays the lossless restore path.",
                 )
 
                 // #644: .noopbak is a plain ZIP, not an encrypted container — anyone who gets the file

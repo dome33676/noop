@@ -146,6 +146,18 @@ class SourceCoordinator(
     private val _ouraWearState = MutableStateFlow<OuraWearState?>(null)
     val ouraWearState: StateFlow<OuraWearState?> = _ouraWearState.asStateFlow()
 
+    /** The RING's own charge while a live Oura source is up, for the Live Console's battery read (#2075).
+     *  Separate from `LiveState.batteryPct`, which is the WHOOP's: one shared LiveState means a bonded
+     *  strap leaves its charge sitting there, and a console that read it while a ring was active
+     *  reported the wrong band's battery under the right band's name. Mirrors [ouraWearState]. */
+    private val _ouraBatteryPct = MutableStateFlow<Int?>(null)
+    val ouraBatteryPct: StateFlow<Int?> = _ouraBatteryPct.asStateFlow()
+
+    /** The live ring's link phase for the Live console's ring status + reconnect affordance (#2305).
+     *  [OuraLiveSource.LinkPhase.DISCONNECTED] when no ring source is live. Mirrors [ouraBatteryPct]. */
+    private val _ouraLinkPhase = MutableStateFlow(OuraLiveSource.LinkPhase.DISCONNECTED)
+    val ouraLinkPhase: StateFlow<OuraLiveSource.LinkPhase> = _ouraLinkPhase.asStateFlow()
+
     /** Collects the active Oura source's adoptPhase / needsPairing into the mirrors above; cancelled and
      *  nulled on teardown so a forgotten ring never leaks a stale outcome. */
     private var ouraStateJob: kotlinx.coroutines.Job? = null
@@ -590,8 +602,20 @@ class SourceCoordinator(
             launch { source.adoptPhase.collect { _ouraAdoptPhase.value = it } }
             launch { source.needsPairing.collect { _ouraNeedsPairing.value = it } }
             launch { source.ouraWearState.collect { _ouraWearState.value = it } }
+            launch { source.batteryPct.collect { _ouraBatteryPct.value = it } }   // #2075
+            launch { source.linkPhase.collect { _ouraLinkPhase.value = it } }     // #2305
         }
         return source
+    }
+
+    /**
+     * The user asked the Live console to reconnect the active ring (#2305). Forwarded to the live Oura
+     * source's own [OuraLiveSource.reconnect]; a no-op when no ring is the live source, so the console can
+     * only ever reconnect the device it is showing — never a WHOOP, never a ring that is not active.
+     * Twin of the Swift `reconnectActiveRing`.
+     */
+    fun reconnectActiveRing() {
+        (activeSource as? OuraLiveSource)?.reconnect()
     }
 
     /**
@@ -628,6 +652,8 @@ class SourceCoordinator(
         _ouraAdoptPhase.value = OuraLiveSource.AdoptPhase.Idle
         _ouraNeedsPairing.value = null
         _ouraWearState.value = null   // #628: no live Oura source -> no wear badge
+        _ouraBatteryPct.value = null  // #2075: nor a stale ring charge
+        _ouraLinkPhase.value = OuraLiveSource.LinkPhase.DISCONNECTED   // #2305
         // A stale speed/cadence/power readout must not outlive the strap session (the source's own stop()
         // already pushes an empty SensorMetrics, but reset here too so leaving for WHOOP / FTMS / Huami —
         // none of which feed this flow — is clean and immediate).
@@ -647,9 +673,13 @@ class SourceCoordinator(
             return isWhoop(device)
         }
 
-        /** A device is WHOOP when its id is "my-whoop" or its brand is "WHOOP" (the seeded row's brand). */
-        fun isWhoop(device: PairedDeviceRow): Boolean =
-            device.id == WhoopBleClient.DEFAULT_DEVICE_ID ||
-                device.brand.equals("WHOOP", ignoreCase = true)
+        /**
+         * A device is WHOOP when its id is "my-whoop" or its brand is "WHOOP" (the seeded row's brand).
+         *
+         * #1881 gave the BLE client the same question to answer, so the rule now lives in ONE place
+         * ([SourceIdentity]) and this delegates. Two spellings of "is this a WHOOP" that could disagree is
+         * precisely how a strap's samples end up filed under a ring.
+         */
+        fun isWhoop(device: PairedDeviceRow): Boolean = SourceIdentity.isWhoop(device)
     }
 }

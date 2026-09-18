@@ -16,7 +16,13 @@ import android.content.SharedPreferences
  * The macOS app stored this in `UserDefaults` under the key `noopPuffinExperiments`; the Android
  * equivalent is [SharedPreferences]. The same key name is reused for parity.
  */
-class PuffinExperiment(private val prefs: SharedPreferences) {
+class PuffinExperiment(
+    private val prefs: SharedPreferences,
+    /** NoopPrefs, where the per-strap refusal latch lives. Required, not defaulted: a caller that omitted
+     *  it would silently re-arm into the very state #2135 is about, and [from] is the only construction
+     *  site there is, so nothing is served by making it skippable. */
+    private val noopPrefs: SharedPreferences,
+) {
 
     /** True if the user opted in to the WHOOP 5/MG protocol probes (default false). */
     var isEnabled: Boolean
@@ -163,6 +169,19 @@ class PuffinExperiment(private val prefs: SharedPreferences) {
                 prefs.all.keys
                     .filter { it.startsWith(UNBONDED_PROBE_SILENT_LINKS_KEY_PREFIX) }
                     .forEach { e.remove(it) }
+                // #1804: clear the inconclusive budget too, so re-arming gives the probe a fresh
+                // start on a strap whose every link was torn down locally.
+                prefs.all.keys
+                    .filter { it.startsWith(UNBONDED_PROBE_INCONCLUSIVE_LINKS_KEY_PREFIX) }
+                    .forEach { e.remove(it) }
+                // #2135: and the refusal latch, the one retirement reason a sweep of THIS file cannot
+                // reach. Same prefix rule, same edge, other file, because it is written at connect time
+                // with a device in hand and so cannot live here.
+                val ne = noopPrefs.edit()
+                noopPrefs.all.keys
+                    .filter { it.startsWith(UNBONDED_OFFLOAD_REFUSED_KEY_PREFIX) }
+                    .forEach { ne.remove(it) }
+                ne.apply()
             }
             e.apply()
         }
@@ -177,6 +196,11 @@ class PuffinExperiment(private val prefs: SharedPreferences) {
      * and the probe would stay retired forever, silently. Keeping the budget on the object that owns the
      * switch makes that drift unrepresentable rather than merely documented.
      *
+     * The refusal latch could not move here, being written at connect time with a device in hand, and it
+     * is exactly the "retired forever, silently" case this paragraph warns about: #2135. The setter is
+     * now handed `NoopPrefs` as well and sweeps the latch by its own prefix, so both files are reachable
+     * from the one place the intent is unambiguous.
+     *
      * Unreadable prefs read as 0 — the probe's other gates bound it, and a prefs failure must not be the
      * thing that keeps a spent budget spent.
      */
@@ -188,6 +212,31 @@ class PuffinExperiment(private val prefs: SharedPreferences) {
     fun setUnbondedProbeSilentLinks(peripheralId: String?, value: Int) {
         runCatching {
             unbondedProbeSilentLinksPrefKey(peripheralId)?.let {
+                prefs.edit().putInt(it, value).apply()
+            }
+        }
+    }
+
+    /**
+     * The probe's persisted inconclusive budget for one strap — links that ended in a LOCAL teardown
+     * (status=22), capped by [UNBONDED_PROBE_MAX_INCONCLUSIVE_LINKS].
+     *
+     * #1804: a local teardown is inconclusive about the strap (our own stack ended the link), so it
+     * does NOT charge the silence budget. But it charges THIS budget, so a strap whose every link is
+     * torn down locally does not retry forever. Larger cap than the silence budget because
+     * inconclusive is genuinely weaker evidence than silence.
+     *
+     * Lives HERE for the same reason the silence budget does: the switch's setter clears these by
+     * prefix and can only sweep its own prefs file.
+     */
+    fun unbondedProbeInconclusiveLinks(peripheralId: String?): Int = runCatching {
+        unbondedProbeInconclusiveLinksPrefKey(peripheralId)?.let { prefs.getInt(it, 0) } ?: 0
+    }.getOrDefault(0)
+
+    /** Record the inconclusive budget. A null address is a no-op, as the read is. */
+    fun setUnbondedProbeInconclusiveLinks(peripheralId: String?, value: Int) {
+        runCatching {
+            unbondedProbeInconclusiveLinksPrefKey(peripheralId)?.let {
                 prefs.edit().putInt(it, value).apply()
             }
         }
@@ -285,6 +334,9 @@ class PuffinExperiment(private val prefs: SharedPreferences) {
         const val KEY_MOTION_AWARE_WAKE = "noopMotionAwareWake"
 
         fun from(context: Context): PuffinExperiment =
-            PuffinExperiment(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE))
+            PuffinExperiment(
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE),
+                context.getSharedPreferences(com.noop.ui.NoopPrefs.NAME, Context.MODE_PRIVATE),
+            )
     }
 }

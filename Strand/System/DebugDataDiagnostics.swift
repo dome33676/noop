@@ -36,14 +36,33 @@ enum DebugDataDiagnostics {
     /// strap simply not worn for two days would be reported as incapable of motion — the opposite kind of
     /// wrong from the one this line exists to prevent. Over a window of actual wear, delivered and capable
     /// are the same thing; the label keeps that assumption visible instead of implied.
-    /// The label is padded to 13 like every other in this block ("Model:", "Data write:"), and the window
+    /// The label is padded to 13 like every other in this block ("Model:", "Offload:"), and the window
     /// rides the VALUE. "Provides(48h):" is 15 and overhung the column in a report that is aligned by hand
     /// and read by eye.
     /// Byte-identical to the Kotlin `AndroidDiagnostics.strapProvidesLine`.
-    static func strapProvidesLine(hr: Bool, rr: Bool, motion: Bool, steps: Bool) -> String {
+    static func strapProvidesLine(hr: Bool, rr: Bool, motion: Bool, steps: Bool,
+                                  deviceId: String) -> String {
         func mark(_ b: Bool) -> String { b ? "yes" : "NO" }
+        // The DEVICE rides the value beside the window, for the same reason the window does. This asks
+        // ONE id, the active one, while every scorer reads the union of the active, canonical and
+        // computed ids. Those disagree on a re-added strap, an archived spine, or a Health Connect
+        // import, and the line then reads as "this install has no heart rate" when it means "the active
+        // strap id delivered none". That misreading cost real triage time on #2012.
         return "Provides:    HR \(mark(hr)) · R-R \(mark(rr)) · motion \(mark(motion)) · steps \(mark(steps))"
-            + " (last 48h)"
+            + " (\(deviceId), last 48h)"
+    }
+
+    /// The note that says the funnel did NOT analyse the latest night, and which one it skipped.
+    ///
+    /// The funnel deliberately walks back to the most recent night carrying skin temperature, because a
+    /// night without it reports "skin=0" and teaches nothing. That fallback is right; printing its result
+    /// under a heading that says "latest night" is not. On #2012 it reported a night four days older than
+    /// the export with no indication, and reading it as the latest night is what a careful reader does.
+    ///
+    /// Empty when the funnel really did take the newest session, so the common case stays unchanged.
+    /// Byte-identical to the Kotlin `AndroidDiagnostics.funnelFallbackNote`.
+    static func funnelFallbackNote(chosenDay: String, newestDay: String) -> String {
+        chosenDay == newestDay ? "" : " (NOT the latest night: \(newestDay) carried no skin temperature)"
     }
 
     static func strapStateLines() -> [String] {
@@ -85,12 +104,26 @@ enum DebugDataDiagnostics {
         let okAt = d.double(forKey: "sync.lastWriteOkAt")
         let stalledAt = d.double(forKey: "sync.lastWriteStalledAt")
         let restoreAt = d.double(forKey: "backup.lastRestoreAt")
-        lines.append("Data write:  \(okAt > 0 ? "rows last landed \(relTime(now - okAt))" : "no rows ever persisted")")
+        // "Offload:", not "Data write:". The stamp is written ONLY when a backfill session persists
+        // rows, so it says nothing about live streaming, and the old label read as "this app has stored
+        // nothing from your strap" on a strap that offloads nothing but streams happily. Twin of the
+        // Kotlin change.
+        lines.append("Offload:     " + (okAt > 0
+            ? "rows last landed \(relTime(now - okAt))"
+            : "no history rows ever persisted (live HR/R-R are not counted here)"))
         if stalledAt > 0, stalledAt >= okAt {
             lines.append("             ⚠ history NOT persisting — last offload STALLED \(relTime(now - stalledAt)) "
                 + "(if you restored a backup, fully restart the app — #57)")
         }
         if restoreAt > 0 { lines.append("Last restore: \(relTime(now - restoreAt))") }
+        #if os(iOS)
+        // What the home-screen widgets cost. Reported unconditionally, including the no-publish case,
+        // because the absence of widget activity is itself the answer to a drain report.
+        //
+        // iOS only: `WidgetTelemetry` lives in StrandiOSShared, which project.yml deliberately keeps
+        // OUT of the macOS application module. macOS has no home-screen widget to account for.
+        lines.append(WidgetTelemetry.snapshot().render())
+        #endif
         #if os(iOS)
         // #52: iOS Backup & Sync folder-picker health. When users report "won't let me pick a folder",
         // this pins the failure stage: "cancelled"/"never used" ⇒ the picker's Open button never fired
@@ -132,7 +165,7 @@ enum DebugDataDiagnostics {
         // EXISTS seeks, not counts — see WhoopStore.streamPresence for why that distinction matters on a
         // table holding ~190k motion rows a night.
         //
-        // HERE and not in strapStateLines() beside `Data write:`, where it belongs by subject: that
+        // HERE and not in strapStateLines() beside `Offload:`, where it belongs by subject: that
         // function is synchronous and holds neither `repo` nor a store handle. The first attempt put it
         // there and would not have compiled — in a file the comment below already notes needs macOS to
         // build, which is exactly why it went unnoticed locally. Appended first so the output order is
@@ -143,7 +176,8 @@ enum DebugDataDiagnostics {
                from: Int(Date().timeIntervalSince1970) - 48 * 3600,
                to: Int(Date().timeIntervalSince1970)) {
             lines.append(strapProvidesLine(hr: present.hr, rr: present.rr,
-                                           motion: present.gravity, steps: present.steps))
+                                           motion: present.gravity, steps: present.steps,
+                                           deviceId: repo.deviceId))
         }
 
         // Data state from the preloaded day spine.
@@ -237,7 +271,10 @@ enum DebugDataDiagnostics {
         let hr = await repo.hrSamples(from: cs.startTs, to: cs.endTs, limit: 200_000)
         let rr = (try? await store.rrIntervals(deviceId: did, from: cs.startTs, to: cs.endTs, limit: 200_000)) ?? []
         let resp = (try? await store.respSamples(deviceId: did, from: cs.startTs, to: cs.endTs, limit: 200_000)) ?? []
-        lines.append("Night \(dayStamp(cs.startTs)): grav=\(grav.count) hr=\(hr.count) rr=\(rr.count) resp=\(resp.count) skin=\(skin.count)")
+        lines.append("Night \(dayStamp(cs.startTs))"
+                     + funnelFallbackNote(chosenDay: dayStamp(cs.startTs),
+                                          newestDay: dayStamp(newest.startTs))
+                     + ": grav=\(grav.count) hr=\(hr.count) rr=\(rr.count) resp=\(resp.count) skin=\(skin.count)")
         if grav.isEmpty && hr.isEmpty {
             // #1617 follow-up: do NOT assert "freshly re-added" without testing the other explanation.
             // Several ids can hold one physical strap's data (#1193/#740), and when the history spine and

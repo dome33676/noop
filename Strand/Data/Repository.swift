@@ -279,6 +279,43 @@ final class Repository: ObservableObject {
         return Self.rawWhoopSourceIds(activeDeviceId: deviceId, registeredWhoopIds: registeredWhoops)
     }
 
+    /// Every namespace the Workouts list reads a row out of, in read order, duplicates collapsed.
+    ///
+    /// Why this exists: the list unions many device ids while `deleteWorkout` deleted from exactly ONE,
+    /// the active strap. A row banked under any other namespace (a retained strap, a computed `-noop`
+    /// sibling, Apple Health, an imported lifting session or activity file) was therefore VISIBLE BUT
+    /// UNDELETABLE: the delete reported nothing, the reload re-read the row from the namespace the delete
+    /// never touched, and it came straight back. Reported as workouts that ignore the delete button
+    /// (#2278).
+    ///
+    /// Deriving both sides from one function is the point. Spelling the union out twice is what let them
+    /// disagree, and a future namespace added to the read alone would reintroduce exactly this bug.
+    nonisolated static func workoutNamespaces(rawIds: [String]) -> [String] {
+        deletableWorkoutNamespaces(rawIds: rawIds)
+            + [WorkoutSource.appleHealthSource, "lifting", "activity-file"]
+    }
+
+    /// The subset of [workoutNamespaces] a DELETE may touch: the strap namespaces only.
+    ///
+    /// Imported history is read-only, and that is enforced everywhere else: the row menu offers only
+    /// "Duplicate as manual…" for an imported row, `bulkDeleteWorkouts` skips those classes outright, and
+    /// `mergeWorkouts` refuses them with "never rewrite imported history". A delete that swept the import
+    /// namespaces would reach underneath all three guards and destroy a wearer's imported Apple Health,
+    /// Hevy/Liftosaur or FIT/GPX/TCX row, which nothing in the UI ever offers to remove.
+    ///
+    /// That a cross-source twin is COLLAPSED into one row at display time does not license deleting the
+    /// imported half of the pair: the dedup is a presentation decision, and the surviving import is
+    /// exactly the history this repository promises not to rewrite.
+    ///
+    /// A `.manual` row, the only class the delete button is offered for, is written under a strap id, so
+    /// this set is what a delete actually needs.
+    nonisolated static func deletableWorkoutNamespaces(rawIds: [String]) -> [String] {
+        (rawIds + rawIds.map { $0.hasSuffix("-noop") ? $0 : $0 + "-noop" })
+            .reduce(into: [String]()) { acc, id in
+                if !acc.contains(id) { acc.append(id) }
+            }
+    }
+
     /// Pure ordering contract shared with Android's parity guard: current active source first, every other
     /// registered WHOOP in stable registry order, canonical history last; duplicates collapse.
     nonisolated static func rawWhoopSourceIds(activeDeviceId: String,
@@ -360,6 +397,13 @@ final class Repository: ObservableObject {
                 out.append(beat)
             }
         }
+        if out.contains(where: { $0.srcChannel?.isWhoop5Transport == true }) {
+            // Retain the selected stream's emission order within a second. Value sorting corrupts
+            // successive differences; original offsets also keep owner precedence deterministic.
+            return out.enumerated().sorted {
+                $0.element.ts != $1.element.ts ? $0.element.ts < $1.element.ts : $0.offset < $1.offset
+            }.map(\.element)
+        }
         return out.sorted {
             if $0.ts != $1.ts { return $0.ts < $1.ts }
             if $0.seq != $1.seq { return $0.seq < $1.seq }
@@ -403,7 +447,11 @@ final class Repository: ObservableObject {
             spo2Ir: rawSpo2FromFiller ? filler.spo2Ir : winner.spo2Ir,
             // Strap-only, like raw SpO2: an imported winner carries no absolute skin temp, so take the
             // filler's rather than let the union blank a value the strap did record (#1636).
-            skinTempC: winner.skinTempC ?? filler.skinTempC
+            skinTempC: winner.skinTempC ?? filler.skinTempC,
+            // Part of the SLEEP GROUP, not an independent column (#1801): it describes how the stage
+            // figures above were derived, so it has to come from whichever row supplied them. A plain
+            // `winner ?? filler` would caption the winner's own hypnogram with the filler's staging.
+            sleepHrOnly: sleepFromFiller ? filler.sleepHrOnly : winner.sleepHrOnly
         )
     }
 
@@ -606,6 +654,23 @@ final class Repository: ObservableObject {
     /// PER-FIELD skin-temperature-deviation carry — twin of the above. See `DailyMetric.lastSkinTempDay`.
     nonisolated static func lastSkinTempDay(days: [DailyMetric], todayKey: String) -> DailyMetric? {
         DailyMetric.lastSkinTempDay(days: days, todayKey: todayKey)
+    }
+
+    /// The freshest strictly-prior row with EITHER skin-temp number (#1844), for the surfaces that lead
+    /// with the absolute. See `DailyMetric.lastSkinTempReadingDay`.
+    nonisolated static func lastSkinTempReadingDay(days: [DailyMetric], todayKey: String) -> DailyMetric? {
+        DailyMetric.lastSkinTempReadingDay(days: days, todayKey: todayKey)
+    }
+
+    /// PER-FIELD HRV carry — twin of the above, for a field `lastVitalsDay`'s OR predicate DOES check but
+    /// can still resolve nil on (#1842). See `DailyMetric.lastHrvDay`.
+    nonisolated static func lastHrvDay(days: [DailyMetric], todayKey: String) -> DailyMetric? {
+        DailyMetric.lastHrvDay(days: days, todayKey: todayKey)
+    }
+
+    /// PER-FIELD resting-HR carry — twin of `lastHrvDay`. See `DailyMetric.lastRestingHrDay`.
+    nonisolated static func lastRestingHrDay(days: [DailyMetric], todayKey: String) -> DailyMetric? {
+        DailyMetric.lastRestingHrDay(days: days, todayKey: todayKey)
     }
 
     /// PER-FIELD respiratory carry — twin of `lastSpo2Day`, but STALENESS-BOUNDED to `Baselines.vitalCarryDays`.
@@ -1122,17 +1187,40 @@ final class Repository: ObservableObject {
         return byTs.values.sorted { $0.ts < $1.ts }
     }
 
+    /// Cheap change-detector over a window of heart rate: a COUNT and a MAX on an indexed column, no
+    /// rows and no decode.
+    ///
+    /// Exists for the stress widget (#2040), whose producer must not read a day's streams on a periodic
+    /// tick just to discover nothing moved. Unions the same ids the reads above do, so a change under
+    /// either source is seen; nil when there is no store yet, which a caller treats as "cannot tell"
+    /// rather than as "unchanged". Twin of Kotlin's `hrFingerprintWindow`.
+    func hrFingerprint(from: Int, to: Int) async -> (count: Int, maxTs: Int)? {
+        guard let store = await ensureStore() else { return nil }
+        var count = 0
+        var maxTs = 0
+        for id in rawPhysiologyReadIds(store: store) {
+            guard let fp = try? await store.hrFingerprint(deviceId: id, from: from, to: to) else { continue }
+            count += fp.count
+            maxTs = max(maxTs, fp.maxTs)
+        }
+        return (count, maxTs)
+    }
+
     /// R-R beats across the active physical WHOOP and canonical history. Exact duplicates are removed
     /// active-first, while same-timestamp distinct beats remain intact.
     func rrIntervals(from: Int, to: Int, limit: Int = 8000) async -> [RRInterval] {
         guard let store = await ensureStore() else { return [] }
+        // Keep each physical strap's independently filtered history after a device switch. Only the
+        // ambiguous canonical alias inherits WHOOP 5's unit guard; a confirmed WHOOP 4 keeps its policy.
+        let activeWhoop5 = (try? await store.isWhoop5RRSource(deviceId: deviceId)) == true
         let ids = rawPhysiologyReadIds(store: store)
         guard ids.count != 1 else {
             return (try? await store.rrIntervals(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
         }
         var lists: [[RRInterval]] = []
         for id in ids {
-            lists.append((try? await store.rrIntervals(deviceId: id, from: from, to: to, limit: limit)) ?? [])
+            lists.append((try? await store.rrIntervals(deviceId: id, from: from, to: to, limit: limit,
+                unlabelledAliasOfWhoop5: activeWhoop5 && id == Self.whoopSource)) ?? [])
         }
         return Self.mergeRRByIdentity(lists)
     }
@@ -1284,30 +1372,79 @@ final class Repository: ObservableObject {
         guard !sessions.isEmpty, let store = await ensureStore() else { return [:] }
         let rawIds = rawPhysiologyReadIds(store: store)
         let computedIds = rawComputedReadIds(store: store)
-        var out: [Int: [Double]] = [:]
-        for session in sessions where out[session.startTs] == nil {
-            // CachedSleepSession has no provenance field. Re-resolve the exact visible block using the
-            // same imported-wins order as allSleepSessions, then probe its computed owner first.
-            var owner: String?
+        let starts = sessions.map(\.startTs)
+        let lo = starts.min() ?? 0
+        let hi = starts.max() ?? 0
+
+        // Phase 1, ownership.
+        //
+        // A block read from the store now carries the device it was read from, so most of the time there
+        // is nothing to resolve. The probe below runs only for blocks built by hand, which is tests and
+        // the importers, and the bounds read happens only if at least one such block is present.
+        //
+        // Provenance gives the SAME answer the probe does. The search takes the first id in
+        // `rawIds + computedIds` whose bounds match, then normalises it to its `-noop` twin, and
+        // `computedIds` is exactly `rawIds` mapped to that suffix. So a block read under a raw id and the
+        // same block read under its computed one both resolve to that one computed source either way.
+        // Disagreeing would take two DIFFERENT straps sharing a start and an end to the second, and
+        // `dedupBlocks` already collapses that pair to a single block, so the probe was picking one of
+        // them arbitrarily as well.
+        //
+        // `sleepSessionBounds`, not `sleepSessions`: the check needs two integers per block, and the fuller
+        // read selects `stagesJSON` among other columns, so it would haul every night's staging blob once
+        // per candidate device to compare a pair of timestamps. Unpaged, so a caller passing a sparse
+        // subset of a wide span cannot page short and lose the owners it dropped.
+        var boundsByDevice: [String: [Int: Int]] = [:]   // deviceId -> startTs -> endTs
+        if sessions.contains(where: { $0.deviceId == nil }) {
             for id in rawIds + computedIds {
-                let rows = (try? await store.sleepSessions(deviceId: id, from: session.startTs,
-                                                           to: session.startTs, limit: 4)) ?? []
-                if rows.contains(where: { $0.startTs == session.startTs && $0.endTs == session.endTs }) {
-                    owner = id
-                    break
+                boundsByDevice[id] = (try? await store.sleepSessionBounds(deviceId: id,
+                                                                          from: lo, to: hi)) ?? [:]
+            }
+        }
+
+        // Resolve each block's ordered source list: its own device when the read supplied one, else the
+        // imported-wins owner search, then its computed twin first and the computed ids behind it.
+        var sourcesByStart: [Int: [String]] = [:]
+        for session in sessions where sourcesByStart[session.startTs] == nil {
+            var owner: String? = session.deviceId
+            if owner == nil {
+                for id in rawIds + computedIds {
+                    if boundsByDevice[id]?[session.startTs] == session.endTs {
+                        owner = id
+                        break
+                    }
                 }
             }
             let ownerComputed = owner.map { $0.hasSuffix("-noop") ? $0 : $0 + "-noop" }
-            let sources = ([ownerComputed].compactMap { $0 } + computedIds).reduce(into: [String]()) {
-                if !$0.contains($1) { $0.append($1) }
+            sourcesByStart[session.startTs] = ([ownerComputed].compactMap { $0 } + computedIds)
+                .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        }
+
+        // Phase 2, motion, in ROUNDS rather than all sources for all blocks.
+        //
+        // A night's motion is one value per epoch, so a night is kilobytes of JSON and a long history is
+        // tens of megabytes. Asking every computed device for every block would decode that several times
+        // over to keep one copy, which is the same trade as pulling `stagesJSON` above: fewer round trips
+        // bought with far more bytes. Round k asks each device only for the blocks whose k-th source it is
+        // and which are still unfilled, so a block is read from its second source only if its first had
+        // nothing. That is the early exit the per-session loop had, kept, with D reads per round instead
+        // of one per block. Owned blocks resolve in the first round, so the second rarely runs.
+        var out: [Int: [Double]] = [:]
+        var round = 0
+        let maxRounds = sourcesByStart.values.map(\.count).max() ?? 0
+        while round < maxRounds {
+            var wantedByDevice: [String: [Int]] = [:]
+            for (start, sources) in sourcesByStart where out[start] == nil && round < sources.count {
+                wantedByDevice[sources[round], default: []].append(start)
             }
-            for id in sources {
-                if let motion = (try? await store.sessionMotion(deviceId: id, sessionStart: session.startTs)) ?? nil,
-                   !motion.isEmpty {
-                    out[session.startTs] = motion
-                    break
+            if wantedByDevice.isEmpty { break }
+            for (id, wanted) in wantedByDevice {
+                let motions = (try? await store.sessionMotions(deviceId: id, sessionStarts: wanted)) ?? [:]
+                for (start, motion) in motions where out[start] == nil && !motion.isEmpty {
+                    out[start] = motion
                 }
             }
+            round += 1
         }
         return out
     }
@@ -1889,6 +2026,17 @@ final class Repository: ObservableObject {
         return DeviceFamily.isWhoop5Registry(model: d?.model, brand: d?.brand)
     }
 
+    /// The active device's registry display name (nickname, else "Brand Model") for a screen that names
+    /// the source of what it plots — the Deep Timeline's source row. `nil` when the active id has no
+    /// registry row (the pre-registry seeded strap), so the caller keeps its legacy "My WHOOP" copy.
+    /// Reads the registry, not a brand string compare: an active Oura ring must read "Oura …", not the
+    /// hardcoded strap label it was shipped with. Twin of Android's `FullDayChartScreen` source pill.
+    func activeDeviceDisplayName() -> String? {
+        guard let store else { return nil }
+        let devices = (try? DeviceRegistryStore(dbQueue: store.registryWriter).all()) ?? []
+        return devices.first(where: { $0.id == deviceId })?.displayName
+    }
+
     /// Whether the active strap has EVER banked a sample of `metric` (#623) — distinguishes a strap that
     /// never produces it (honest "not supported on this strap" copy) from one with just an unsynced window.
     /// Only SpO₂/respiration are asked; any other metric returns true so the generic empty copy stands.
@@ -1923,7 +2071,9 @@ final class Repository: ObservableObject {
             // rather than a noisy spike. The `to - from` span chooses the window width: a 2-min rMSSD for a
             // zoomed-in look, widening with the visible span so a day-scale view stays readable. The thinning
             // stride keeps a 1 Hz R-R stream from emitting a point per beat.
-            let rr = (try? await store.rrIntervals(deviceId: source, from: from, to: to, limit: 200_000)) ?? []
+            let activeWhoop5 = (try? await store.isWhoop5RRSource(deviceId: deviceId)) ?? true
+            let rr = (try? await store.rrIntervals(deviceId: source, from: from, to: to, limit: 200_000,
+                unlabelledAliasOfWhoop5: activeWhoop5 && source == Self.whoopSource)) ?? []
             let window = Self.hrvRollingWindowSec(spanSeconds: to - from)
             // rollingRmssd + the map over its output run OFF the main actor (mirrors the HR branch's
             // Task.detached in `timelineSeries`): only the already-read Sendable `rr` rows cross in.
@@ -2709,31 +2859,28 @@ final class Repository: ObservableObject {
         _ = try? await store.deleteTemplate(id: id)
     }
 
-    /// All workouts (Whoop + Apple Health + on-device detected bouts), newest first.
+    /// All workouts (WHOOP + Apple Health + manual + grandfathered detected bouts), newest first.
     ///
-    /// Detected bouts are surfaced with an honest "Detected" badge so the user can see , and
-    /// dismiss or re-label , a duplicate the auto-detector created (#107). Dismissed detected spans
-    /// are filtered HERE so every consumer (Workouts screen, Today, Coach context) agrees: the engine
-    /// re-derives the detected rows each run, so a plain delete would resurrect them; the dismissed
-    /// span list is the durable "not a workout" record.
+    /// Legacy detected bouts remain surfaced with an honest "Detected" badge and stay editable,
+    /// dismissible and exportable; new scoring passes neither create nor reconcile them (#2187).
+    /// Dismissed spans are still filtered HERE so every consumer (Workouts, Today, Coach) preserves the
+    /// user's prior "not a workout" decisions and the confirmation card cannot resurrect those windows.
     func workoutRows(days: Int = 4000) async -> [WorkoutRow] {
         guard let store = await ensureStore() else { return [] }
         let now = Int(Date().timeIntervalSince1970)
         let lo = now - days * 86_400, hi = now + 86_400
-        // UNION the active strap + canonical (and their computed siblings) so workouts banked under the
-        // canonical "my-whoop" before a re-add still show, alongside the re-added strap's live workouts.
+        // UNION every registered WHOOP + canonical (and computed siblings) so workouts banked before a
+        // re-add remain visible alongside every retained strap's live workouts.
         // De-dup identical same-source rows that appear under both union ids by natural key (the cross-SOURCE
         // dedup below only collapses strap-vs-Apple twins, not a row present in two strap namespaces).
         var rows: [WorkoutRow] = []
-        for id in importedReadIds { rows += (try? await store.workouts(deviceId: id, from: lo, to: hi, limit: 5000)) ?? [] }
-        for id in computedReadIds { rows += (try? await store.workouts(deviceId: id, from: lo, to: hi, limit: 5000)) ?? [] }
-        rows += (try? await store.workouts(deviceId: "apple-health", from: lo, to: hi, limit: 5000)) ?? []
-        // Imported lifting sessions (Hevy / Liftosaur) live under their own "lifting" source.
-        rows += (try? await store.workouts(deviceId: "lifting", from: lo, to: hi, limit: 5000)) ?? []
-        // #29: imported activity FILES (FIT / GPX / TCX) live under their own "activity-file" source — read
-        // them too, or a successful file import never appears in the Workouts list (Data Sources counts it,
-        // the load didn't). HR is reconciled from the strap trace at the end like every other row.
-        rows += (try? await store.workouts(deviceId: "activity-file", from: lo, to: hi, limit: 5000)) ?? []
+        // Every namespace in one list, shared with `deleteWorkout` so the two cannot disagree about where a
+        // row lives. Covers each raw id, its computed `-noop` sibling, Apple Health, imported lifting
+        // sessions (Hevy / Liftosaur) and imported activity FILES (#29: FIT / GPX / TCX, or a successful
+        // file import never appears here at all). HR is reconciled from the strap trace at the end.
+        for id in Self.workoutNamespaces(rawIds: rawPhysiologyReadIds(store: store)) {
+            rows += (try? await store.workouts(deviceId: id, from: lo, to: hi, limit: 5000)) ?? []
+        }
         rows = Self.dedupWorkoutsByNaturalKey(rows)
         let spans = WorkoutSource.parseDismissedSpans(dismissedDetectedSpans)
         // #687: collapse the SAME activity tracked live under the strap AND imported from Health Connect /
@@ -2920,13 +3067,12 @@ final class Repository: ObservableObject {
     // MARK: - Workout editing (manual add/edit · relabel · dismiss · delete)
     //
     // Manual workouts live under the strap source (deviceId == `deviceId`, source "manual") , the same
-    // place v1.67's live-tracked sessions already land (AppModel.endWorkout). Detected bouts live under
-    // the computed `computedDeviceId` with sport "detected" and are wiped + re-derived each engine run,
-    // so the only durable way to keep one hidden after a re-detect is the dismissed-span list below.
+    // place v1.67's live-tracked sessions already land (AppModel.endWorkout). Legacy detected bouts live
+    // under the computed `computedDeviceId` with sport "detected". New scoring passes preserve those rows;
+    // the dismissal list remains part of the transition contract and keeps prior user intent intact.
 
-    /// The persisted dismissed detected spans ("startTs:endTs"). Read straight off UserDefaults so the
-    /// read path and the write path share one source of truth (the engine never sees this , it always
-    /// re-derives; only the read filter and these mutators consult it).
+    /// The persisted legacy detected spans ("startTs:endTs"). Read straight off UserDefaults so the read
+    /// filter, mutators and confirmation-candidate selector share one source of truth.
     private var dismissedDetectedSpans: [String] {
         get { UserDefaults.standard.stringArray(forKey: WorkoutSource.dismissedDefaultsKey) ?? [] }
         set { UserDefaults.standard.set(newValue, forKey: WorkoutSource.dismissedDefaultsKey) }
@@ -2934,37 +3080,54 @@ final class Repository: ObservableObject {
 
     /// Persist a retroactive / edited manual workout under the strap source. `replacing` is the row the
     /// edit started from:
-    ///  - editing a DETECTED bout ("Edit details…") replaces it with this manual row , the detected
-    ///    original is dismissed durably so the re-detector doesn't bring it back (else both would show);
-    ///  - editing a MANUAL row whose natural key (startTs/sport) changed deletes the stale strap row
-    ///    first (the (deviceId, startTs, sport) PK upsert would otherwise orphan it);
+    ///  - editing a grandfathered DETECTED bout ("Edit details…") first saves this manual row, then
+    ///    retires the original while retaining its legacy dismissal marker;
+    ///  - editing a MANUAL row whose natural key (startTs/sport) changed first saves the replacement,
+    ///    then retires the stale strap row. A failed write therefore preserves the original;
     ///  - an IMPORTED row is never passed here as `replacing` (duplicating one is a pure add), so its
     ///    history is never touched.
     func saveManualWorkout(_ row: WorkoutRow, replacing old: WorkoutRow? = nil) async {
         guard let store = await ensureStore() else { return }
         if let old, WorkoutSource.classify(old.source) == .detected {
+            // Write the replacement first. If that insert fails, the grandfathered source row and its
+            // visibility remain untouched; a failed explicit edit must not turn into data loss.
+            do { _ = try await store.upsertWorkouts([row], deviceId: deviceId) }
+            catch { return }
             await dismissDetected(old)
+            return
         } else if let old, old.startTs != row.startTs || old.sport != row.sport {
-            _ = try? await store.deleteWorkouts(deviceId: deviceId, sport: old.sport,
-                                                from: old.startTs, to: old.startTs)
+            // Write the replacement before deleting anything. If SQLite rejects the insert, leave both the
+            // original row and its route untouched; if the later delete fails, the recoverable result is two
+            // rows rather than lost history.
+            do { _ = try await store.upsertWorkouts([row], deviceId: deviceId) }
+            catch { return }
             // #10: the GPS route lives in RouteStore keyed by the natural key (startTs + sport), NOT in the
-            // DB row. Re-keying the DB row above without moving the route would orphan it under the OLD key,
-            // so the detail view's route + distance vanish after a sport/start edit. Re-key the route too:
-            // read it under the old key and, ONLY if one exists, store it under the new key then drop the old.
-            if let route = RouteStore.load(startTs: old.startTs, sport: old.sport) {
+            // DB row. Copy it only after the replacement row is durable. Keep the old copy until the old
+            // DB row is successfully retired, so a delete failure preserves both complete versions.
+            let oldRoute = RouteStore.load(startTs: old.startTs, sport: old.sport)
+            if let route = oldRoute {
                 RouteStore.store(route, startTs: row.startTs, sport: row.sport)
-                RouteStore.remove(startTs: old.startTs, sport: old.sport)
             }
+            do {
+                _ = try await store.deleteWorkouts(deviceId: deviceId, sport: old.sport,
+                                                   from: old.startTs, to: old.startTs)
+                if oldRoute != nil {
+                    RouteStore.remove(startTs: old.startTs, sport: old.sport)
+                }
+            } catch {
+                // Replacement and both route keys remain available; retrying the edit is safe.
+            }
+            return
         }
         _ = try? await store.upsertWorkouts([row], deviceId: deviceId)
     }
 
-    /// Re-label a detected bout: copy it to a manual strap row with the chosen sport, then delete the
-    /// detected original. This survives analyzeRecent , the engine wipes + re-derives only sport
-    /// "detected" rows under the computed id AND skips any re-derived bout overlapping a real strap
-    /// workout, which this copy now is , so the same session is never re-created as a duplicate. (#107)
+    /// Re-label a legacy detected bout: copy it to a manual strap row with the chosen sport, then delete
+    /// the detected original. The analytics detector may still enrich this real row on a later pass, but
+    /// it no longer recreates a generic detected twin. (#107/#2187)
     func relabelDetected(_ row: WorkoutRow, sport: String) async {
         guard let store = await ensureStore() else { return }
+        guard WorkoutSource.classify(row.source) == .detected else { return }
         let trimmed = sport.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         let manual = WorkoutRow(startTs: row.startTs, endTs: row.endTs, sport: trimmed, source: "manual",
@@ -2972,32 +3135,50 @@ final class Repository: ObservableObject {
                                 avgHr: row.avgHr, maxHr: row.maxHr, strain: row.strain,
                                 distanceM: row.distanceM, zonesJSON: row.zonesJSON, notes: row.notes,
                                 steps: row.steps)
-        _ = try? await store.upsertWorkouts([manual], deviceId: deviceId)
-        _ = try? await store.deleteWorkouts(deviceId: computedDeviceId, sport: "detected",
-                                            from: row.startTs, to: row.startTs)
+        do { _ = try await store.upsertWorkouts([manual], deviceId: deviceId) }
+        catch { return }
+        // Retire through the shared path so the legacy marker also prevents resurrection if deletion
+        // fails or the manual replacement is later removed.
+        await dismissDetected(row)
     }
 
-    /// Dismiss a DETECTED bout the user says isn't a workout. Records its span in the durable dismissed
-    /// list (so a re-detect that recreates the same span stays hidden) AND deletes the current row so it
-    /// disappears immediately. Idempotent: a span already present isn't duplicated. (#107)
+    /// Dismiss a grandfathered DETECTED bout the user says isn't a workout. Records its span for legacy
+    /// compatibility and suggestion suppression, then deletes the current row so it disappears immediately.
+    /// Idempotent: a span already present isn't duplicated. (#107/#2187)
     func dismissDetected(_ row: WorkoutRow) async {
         guard WorkoutSource.classify(row.source) == .detected else { return }
         let token = WorkoutSource.dismissedToken(for: row)
         var spans = dismissedDetectedSpans
         if !spans.contains(token) { spans.append(token); dismissedDetectedSpans = spans }
         guard let store = await ensureStore() else { return }
-        _ = try? await store.deleteWorkouts(deviceId: computedDeviceId, sport: row.sport,
+        // The displayed history is a union across current and archived computed ids; `source` is the
+        // detected row's owning id and is therefore the only safe deletion target.
+        _ = try? await store.deleteWorkouts(deviceId: row.source, sport: row.sport,
                                             from: row.startTs, to: row.startTs)
     }
 
-    /// Delete ONE workout by natural key. The read model has no deviceId, so reconstruct it from the
-    /// source: detected rows live under the computed id (and also get their span dismissed so they don't
-    /// come back); everything else the screen can delete (manual) lives under the strap id.
+    /// Delete ONE workout by natural key. A detected row carries its computed owner in `source` and also
+    /// gets a durable dismissal marker; everything else the screen can delete (manual) lives under the
+    /// active strap id.
     func deleteWorkout(_ row: WorkoutRow) async {
         if WorkoutSource.classify(row.source) == .detected { await dismissDetected(row); return }
         guard let store = await ensureStore() else { return }
-        _ = try? await store.deleteWorkouts(deviceId: deviceId, sport: row.sport,
-                                            from: row.startTs, to: row.startTs)
+        // Sweep every STRAP namespace, not just the active one. A manual row banked under a retained
+        // strap or a computed sibling is shown by `workoutRows` and was previously undeletable: the
+        // delete touched one namespace, the reload re-read the row from another, and it reappeared
+        // (#2278).
+        //
+        // Import namespaces are deliberately excluded, see `deletableWorkoutNamespaces`: imported
+        // history is read-only and no UI offers to remove it.
+        //
+        // Narrow by construction. The natural key is exact (`sport` plus a single `startTs`), so this
+        // removes the row the wearer tapped and its copies in the strap namespaces, nothing else. An
+        // overlapping-but-differently-keyed session is NOT touched; collapsing those is the dedup's job
+        // at display time, not a delete's.
+        for id in Self.deletableWorkoutNamespaces(rawIds: rawPhysiologyReadIds(store: store)) {
+            _ = try? await store.deleteWorkouts(deviceId: id, sport: row.sport,
+                                                from: row.startTs, to: row.startTs)
+        }
     }
 
     /// #64: merge two-or-more overlapping / adjacent MANUAL or DETECTED sessions into ONE manual session
@@ -3007,7 +3188,7 @@ final class Repository: ObservableObject {
     ///   1. re-key at most one GPS route onto the merged natural key (the longest, matching #10), dropping
     ///      the others so no route is orphaned;
     ///   2. save the merged row under the strap id (the manual path);
-    ///   3. per original: a DETECTED bout is durably dismissed (so a re-detect can't resurrect it), a
+    ///   3. per original: a DETECTED bout is retired with its legacy dismissal marker, a
     ///      MANUAL row is deleted by natural key, BUT never touch a source that equals the merged row's
     ///      own natural key (a detected original that shares the merged start/sport would otherwise dismiss
     ///      a span the merged row now occupies).
@@ -3025,8 +3206,12 @@ final class Repository: ObservableObject {
             }
         }
 
-        // Save the merged manual row.
-        await saveManualWorkout(merged)
+        // Save the merged manual row before retiring any source row. `saveManualWorkout` deliberately
+        // swallows persistence failures for UI callers, but this destructive follow-up must know whether
+        // the insert succeeded: a failed merge write must leave every original untouched.
+        guard let store = await ensureStore() else { return }
+        do { _ = try await store.upsertWorkouts([merged], deviceId: deviceId) }
+        catch { return }
 
         // Retire each original. Skip any row whose natural key matches the merged row's, so we never
         // dismiss/delete the span the merged row now owns.
@@ -3064,16 +3249,15 @@ final class Repository: ObservableObject {
         }
     }
 
-    // MARK: - Auto-detect workouts (opt-in MVP) , the "Looks like a workout?" Today prompt
+    // MARK: - Auto-detect workouts , the opt-in "Looks like a workout?" Today prompt
     //
-    // Pure read + suggestion path for the opt-in `AutoWorkoutDetector`. This is SEPARATE from the
-    // gravity-gated detected-bouts pipeline above (which writes "detected" rows under the computed id):
-    // nothing here is ever persisted as a workout until the user taps Save, and a dismissed suggestion
-    // is remembered in its OWN durable span list (distinct key from `dismissedDetected`) so it never
-    // re-prompts. The detector + thresholds are byte-mirrored in the Android twin.
+    // This is the only path that can create a NEW visible automatically suggested workout, and it still
+    // saves nothing until the user taps Save. The analytics detector remains internal for daily scoring
+    // and overlap enrichment; it no longer persists generic `sport="detected"` rows. Both historical
+    // dismissal stores are honored during the transition so retiring that writer cannot resurrect a bout.
 
-    /// Dismissed AUTO-DETECT spans ("startSec:endSec"), kept apart from the gravity detector's
-    /// `dismissedDetected` list so the two features never cross-suppress each other.
+    /// Dismissed AUTO-DETECT spans ("startSec:endSec"). The key remains distinct for backup compatibility;
+    /// candidate selection also honors the legacy `dismissedDetected` intervals during the transition.
     private static let autoDetectDismissedKey = "workouts.autoDetectDismissed"
     private var autoDetectDismissedSpans: [String] {
         get { UserDefaults.standard.stringArray(forKey: Self.autoDetectDismissedKey) ?? [] }
@@ -3081,7 +3265,30 @@ final class Repository: ObservableObject {
     }
 
     /// Token for one auto-detect span (matches the detector's integer seconds).
-    private func autoDetectToken(_ w: DetectedWorkout) -> String { "\(w.startSec):\(w.endSec)" }
+    nonisolated private static func autoDetectToken(_ w: DetectedWorkout) -> String {
+        "\(w.startSec):\(w.endSec)"
+    }
+
+    /// Select the newest published suggestion after applying BOTH durable dismissal contracts. The
+    /// suggestion detector historically used exact span tokens; engine-created rows used half-open overlap
+    /// tombstones because a re-score could shift the inferred boundary by a few seconds. Preserve both
+    /// semantics so neither kind of prior dismissal can reappear during the unification.
+    nonisolated static func selectAutoDetectCandidate(
+        _ candidates: [DetectedWorkout],
+        autoDismissedTokens: [String],
+        detectedDismissedTokens: [String]
+    ) -> DetectedWorkout? {
+        let exact = Set(autoDismissedTokens)
+        let legacy = WorkoutSource.parseDismissedSpans(detectedDismissedTokens)
+        return candidates
+            .filter { candidate in
+                !exact.contains(autoDetectToken(candidate))
+                    && !legacy.contains { span in
+                        candidate.startSec < span.end && span.start < candidate.endSec
+                    }
+            }
+            .max(by: { $0.startSec < $1.startSec })
+    }
 
     /// Hard cap on the dismissed-span list , a backstop so the UserDefaults array can't grow without
     /// bound even in pathological use. 200 most-recent (by span END) is far more than detection's ~2-day
@@ -3136,25 +3343,40 @@ final class Repository: ObservableObject {
         let saved = await workoutRows()
         let savedSpans = saved.map { SavedWorkoutSpan(startSec: $0.startTs, endSec: $0.endTs) }
 
-        // Workouts & GPS test mode: when on, run the diagnostic twin which returns the SAME candidates
-        // detect(...) does (it reuses detect verbatim) plus the inputs / thresholds / per-window why trace,
-        // tagged `.workouts`. Zero-cost when off: the gate is one UserDefaults bool read inside emitWorkouts,
-        // and detectTrace is only called on that branch, so the default path runs the untraced detect.
+        // Workouts & GPS test mode: the published 12-minute result remains byte-identical. Aggregate,
+        // local-only comparisons include that 12-minute baseline plus the 10- and 15-minute alternatives.
+        // Shadow candidates are compared only with manual/imported labels; legacy detector rows are not
+        // ground truth. No shadow output can mutate the DB, visible card, daily scores or anything off-device.
         let candidates: [DetectedWorkout]
         if TestCentre.active(.workouts), workoutsLog != nil {
             let (results, trace) = AutoWorkoutDetector.detectTrace(
-                hr: hr, restingBpm: restingBpm, motion: nil, savedSpans: savedSpans, path: "autoDetect")
+                hr: hr, restingBpm: restingBpm, motion: nil, savedSpans: savedSpans,
+                minimumSustainedMinutes: AutoWorkoutDetector.minSustainedMin,
+                path: "autoDetect")
             for line in trace { emitWorkouts(line) }
+            let labelledSpans = saved
+                // `workoutRows()` intentionally returns long-lived history for the UI. Shadow candidates
+                // only cover this detector scan, so count labels in that same [from, now] start-time window
+                // (matching Android's range-scoped queries) or old sessions become false "missed" results.
+                .filter {
+                    $0.startTs >= from && $0.startTs <= now
+                        && WorkoutSource.classify($0.source) != .detected
+                }
+                .map { SavedWorkoutSpan(startSec: $0.startTs, endSec: $0.endTs) }
+            for line in AutoWorkoutDetector.shadowComparisonLines(
+                hr: hr, restingBpm: restingBpm, motion: nil, savedSpans: labelledSpans) {
+                emitWorkouts(line)
+            }
             candidates = results
         } else {
             candidates = AutoWorkoutDetector.detect(hr: hr, restingBpm: restingBpm,
-                                                    motion: nil, savedSpans: savedSpans)
+                                                    motion: nil, savedSpans: savedSpans,
+                                                    minimumSustainedMinutes: AutoWorkoutDetector.minSustainedMin)
         }
-        // Drop anything the user already dismissed, then take the most recent.
-        let dismissed = Set(autoDetectDismissedSpans)
-        return candidates
-            .filter { !dismissed.contains(autoDetectToken($0)) }
-            .max(by: { $0.startSec < $1.startSec })
+        return Self.selectAutoDetectCandidate(
+            candidates,
+            autoDismissedTokens: autoDetectDismissedSpans,
+            detectedDismissedTokens: dismissedDetectedSpans)
     }
 
     /// SAVE a suggested window as a manual-style "Workout" (generic sport , we don't claim a sport we
@@ -3176,7 +3398,7 @@ final class Repository: ObservableObject {
     /// Prunes the stored list on every add (drop spans older than ~30 days + hard-cap to 200 most-recent)
     /// so it can never grow unbounded. Byte-mirrored in the Android `AutoWorkoutPrefs.dismiss`.
     func dismissDetectedSuggestion(_ w: DetectedWorkout) {
-        let token = autoDetectToken(w)
+        let token = Self.autoDetectToken(w)
         var spans = autoDetectDismissedSpans
         guard !spans.contains(token) else { return }
         spans.append(token)
@@ -3338,7 +3560,11 @@ final class Repository: ObservableObject {
     }
 }
 
-private extension DailyMetric {
+// `internal`, not `private`: `DailySkinTempAbsoluteCarryTests` exercises these two directly, and a
+// `private` extension is invisible even to `@testable import`. They stayed private because the tests
+// that call them have never compiled (StrandTests runs only in the on-demand app-build), so nothing
+// ever demanded the wider access. Still confined to this module.
+extension DailyMetric {
     /// A copy of self where every nil field is backfilled from `fallback`. Used by the field-by-field
     /// daily merge so an imported export keeps its own values while a computed row fills the gaps it
     /// doesn't carry (e.g. on-device Charge / skin-temp deviation / activity totals).
@@ -3368,7 +3594,10 @@ private extension DailyMetric {
             avgSdnn: avgSdnn ?? fallback.avgSdnn,
             // On-device only (imports never carry it), so an imported row's nil is backfilled from the
             // computed fallback — otherwise the night's absolute would be lost. (#1636)
-            skinTempC: skinTempC ?? fallback.skinTempC
+            skinTempC: skinTempC ?? fallback.skinTempC,
+            // Same shape, same reason (#1801): only a scoring pass knows how the night was staged, so an
+            // imported row's nil takes the computed answer rather than erasing it.
+            sleepHrOnly: sleepHrOnly ?? fallback.sleepHrOnly
         )
     }
 
@@ -3398,7 +3627,11 @@ private extension DailyMetric {
             spo2Red: spo2Red,   // non-sleep field: preserved as-is (#93)
             spo2Ir: spo2Ir,
             avgSdnn: avgSdnn,   // non-sleep (HRV) field: preserved as-is
-            skinTempC: skinTempC // non-sleep (thermal) field: preserved as-is (#1636)
+            skinTempC: skinTempC, // non-sleep (thermal) field: preserved as-is (#1636)
+            // MOVES with the sleep columns, unlike the others here: it describes how the very stage
+            // figures being taken were derived, so leaving `self`'s behind would caption the source's
+            // hypnogram with the import's staging — and an import's is always nil. (#1801)
+            sleepHrOnly: source.sleepHrOnly
         )
     }
 }

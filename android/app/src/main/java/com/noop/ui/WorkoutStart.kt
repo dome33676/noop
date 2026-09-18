@@ -265,30 +265,27 @@ fun WorkoutStartSection(vm: AppViewModel, onAdd: () -> Unit) {
         }
     } else if (live.bonded) {
         // Start + Add as an equal-width action row (EXP-018 parity with the iOS workoutActionRow).
-        //
-        // #1602: CENTRED, not top-aligned. A Row defaults to `Alignment.Top`, so any height difference
-        // between the two children showed as one button riding higher than the other — which is how this
-        // was reported. The heights are now matched in `AddWorkoutButton`, so this is belt-and-braces:
-        // it keeps a future divergence looking like a size difference rather than a broken layout.
-        // SwiftUI's HStack centres by default, which is why the iOS twin never showed it.
+        // Both actions use the shared opaque button surfaces: unlike the old accent-muted/translucent
+        // pair, their fills and labels keep their contrast over the full-bleed daytime scene (#1625).
         Row(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Button(
+            NoopButton(
+                text = uiString(R.string.l10n_workout_start_start_workout_d0f3f2cd),
+                kind = NoopButtonKind.Primary,
                 onClick = { showSportPicker = true },
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Palette.accent, contentColor = Palette.surfaceBase,
-                ),
-            ) { Text(uiString(R.string.l10n_workout_start_start_workout_d0f3f2cd), style = NoopType.captionNumber) }
+            )
             AddWorkoutButton(onAdd, Modifier.weight(1f))
         }
     } else {
         // No strap to stream from: no live Start, but keep Add so a user with no imports can still log.
-        AddWorkoutButton(onAdd, Modifier.fillMaxWidth())
+        // PRIMARY here, unlike the pair above. There is no Start to be secondary to, and this is the
+        // only action the screen offers, so the secondary treatment would leave a wearer with no strap
+        // looking at the faintest control in the app as their sole way forward.
+        AddWorkoutButton(onAdd, Modifier.fillMaxWidth(), kind = NoopButtonKind.Primary)
     }
 
     if (showSportPicker) {
