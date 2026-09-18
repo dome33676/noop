@@ -10,6 +10,37 @@ do not merge entries between the two.
 
 ---
 
+## `0e97d105` — Weight sleep regularity more heavily in the Rest (sleep_performance) score (2026-09-18)
+
+Rest weights were duration 0.50 / efficiency 0.20 / restorative 0.20 /
+consistency 0.10 -- consistency (sleep/wake regularity) was the smallest
+of the four terms. Doubled it to 0.20, funded by trimming 0.05 each off
+duration and restorative (efficiency left untouched as the least
+negotiable "hygiene" factor): 0.45 / 0.20 / 0.15 / 0.20, still summing to
+1.0.
+
+The consistency signal itself is unchanged -- VitalityEngine.
+sleepConsistency computes 1 minus the coefficient of variation of
+trailing nightly sleep DURATION (how steady the hours-per-night are),
+not bed/wake-TIME regularity the way WHOOP's own published Sleep
+Consistency metric works. Only this term's weight changed, not what it
+measures; redesigning the signal itself is a separate, bigger piece of
+work if ever wanted.
+
+Updated in lockstep on both platforms (the Kotlin RestScorer mirror must
+stay byte-identical to Swift's AnalyticsEngine.Rest, enforced by parity
+tests) plus every hardcoded expected value across both test suites that
+depended on the old weights -- recomputed by hand with exact IEEE 754
+arithmetic (not just substituting the new literals into old formulas,
+which would have silently broken two Kotlin tests landing on a
+floating-point rounding boundary the old weights didn't hit). Also fixed
+a stale doc comment in the Kotlin RestScorer header claiming the
+consistency term "drops and renormalizes" when absent -- it doesn't
+(neutral 0.5 at full weight, matching Swift, and correctly described a
+few lines further down in the same file already).
+
+---
+
 ## `75f1db78` — Fix findings from the full-codebase review: frozen Rhythm screen, double-tap dedup gap, WRIST dual-delivery, stress shadow window, deal year-boundary, hydration staleness (2026-09-12)
 
 RhythmHost (V5PillarHosts.swift): a leftover !loaded guard defeated the
