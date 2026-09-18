@@ -10,10 +10,10 @@ final class RestSubScoreTraceTests: XCTestCase {
             restorativeSeconds: 4 * 3600, needHours: 8.0, consistency: nil,
             deepSeconds: 1 * 3600, groupFragments: 1, groupInBedSeconds: 8 * 3600 / 0.92)
         XCTAssertTrue(line.hasPrefix("rest "), line)
-        XCTAssertTrue(line.contains("wDur=0.5"))
+        XCTAssertTrue(line.contains("wDur=0.45"))
         XCTAssertTrue(line.contains("wEff=0.2"))
-        XCTAssertTrue(line.contains("wRestor=0.2"))
-        XCTAssertTrue(line.contains("wConsist=0.1"))
+        XCTAssertTrue(line.contains("wRestor=0.15"))
+        XCTAssertTrue(line.contains("wConsist=0.2"))
         XCTAssertTrue(line.contains("group=1"))
         XCTAssertFalse(line.contains("\u{2014}"))
     }

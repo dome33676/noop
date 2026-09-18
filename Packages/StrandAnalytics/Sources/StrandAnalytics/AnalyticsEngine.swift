@@ -383,10 +383,11 @@ public enum AnalyticsEngine {
                                   // their neutral form so pure-function callers/tests get a well-defined
                                   // Rest from a single night; IntelligenceEngine refines them from history.
                                   //   sleepNeedHours: personal sleep need (h). Default 8 h; the caller
-                                  //     refines it toward the recent average. Drives the 0.50 duration term.
+                                  //     refines it toward the recent average. Drives the 0.45 duration term.
                                   //   sleepConsistency: sleep/wake regularity in [0,1] (1 = perfectly
                                   //     regular). nil → the consistency term is neutral (0.5) since a single
                                   //     day carries no regularity signal — the caller supplies it from history.
+                                  //     Drives the 0.20 consistency term (doubled from 0.10 on user request).
                                   sleepNeedHours: Double = Rest.defaultNeedHours,
                                   sleepConsistency: Double? = nil,
                                   // The user's learned habitual midsleep (local time-of-day seconds in
@@ -1005,21 +1006,29 @@ public enum AnalyticsEngine {
     // MARK: - Rest composite (Charge/Effort/Rest)
 
     /// The 0–100 Rest score. Composite of four published-sleep-quality components:
-    ///   - duration vs personal need (0.50): hours asleep ÷ need, clamped to 1.0.
+    ///   - duration vs personal need (0.45): hours asleep ÷ need, clamped to 1.0.
     ///   - efficiency (0.20): asleep / in-bed, already in [0,1].
-    ///   - restorative share (0.20): (deep + REM) ÷ asleep, clamped to a 0.50 target
+    ///   - restorative share (0.15): (deep + REM) ÷ asleep, clamped to a 0.50 target
     ///     (≈50% deep+REM is "full marks"; healthy adults sit ~40–50%).
-    ///   - consistency (0.10): sleep/wake regularity in [0,1]; a single day carries no
+    ///   - consistency (0.20): sleep/wake regularity in [0,1]; a single day carries no
     ///     regularity signal, so the caller supplies it from history — nil → neutral 0.5.
     /// All sub-scores clamp to [0,1]; the weighted sum scales to [0,100]. Kept
     /// dependency-free + constant-explicit so the Kotlin mirror is byte-identical.
+    ///
+    /// Weights were 0.50/0.20/0.20/0.10 originally; consistency was doubled to 0.20 on user request
+    /// (regularity matters more than the smallest weight suggested), funded by trimming 0.05 each off
+    /// duration and restorative — efficiency left untouched as the least negotiable "hygiene" factor.
+    /// `sleepConsistency` itself (`VitalityEngine.sleepConsistency`) is 1 − coefficient-of-variation of
+    /// trailing nightly sleep DURATION (how steady the hours-per-night are), not bed/wake-time
+    /// regularity (WHOOP's own published Sleep Consistency metric, which tracks clock-time alignment
+    /// across nights) — this term's WEIGHT changed, not what it measures.
     ///
     /// DEEP-sleep honesty (Reddit HRV/sleep report): pooling deep+REM let a night with normal REM
     /// but almost no DEEP still earn near-full restorative credit (so Rest read 95+ with little deep).
     /// When the caller supplies the DEEP split (`deepSeconds`), the restorative sub-score is scaled by
     /// a gentle deep-adequacy factor: full credit once deep ≥ `deepShareTarget` (~13% of asleep is the
     /// healthy floor), ramping to `deepFloorFactor` (0.5 — never zeroed) as deep → 0. So a near-zero-deep
-    /// night loses up to half the 0.20 restorative term (~10 pts) — honest, not tanking, no fabricated
+    /// night loses up to half the restorative term — honest, not tanking, no fabricated
     /// stages. Deep unknown (`deepSeconds == nil`, e.g. an imported night with only a pooled total) →
     /// factor 1.0, identical to the prior pooled behaviour.
     public enum Rest {
@@ -1036,10 +1045,10 @@ public enum AnalyticsEngine {
         /// Neutral consistency when the caller supplies no regularity signal.
         public static let neutralConsistency: Double = 0.5
 
-        public static let wDuration: Double = 0.50
+        public static let wDuration: Double = 0.45
         public static let wEfficiency: Double = 0.20
-        public static let wRestorative: Double = 0.20
-        public static let wConsistency: Double = 0.10
+        public static let wRestorative: Double = 0.15
+        public static let wConsistency: Double = 0.20
 
         /// Minimum trailing nights before a personal sleep-need estimate is trusted; below this the
         /// population default is used (cold-start honesty — never learn a need from a few nights).

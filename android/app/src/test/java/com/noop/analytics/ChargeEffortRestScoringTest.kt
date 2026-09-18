@@ -198,10 +198,10 @@ class ChargeEffortRestScoringTest {
 
     @Test
     fun rest_weightConstants() {
-        assertEquals(0.50, RestScorer.wDuration, 0.0)
+        assertEquals(0.45, RestScorer.wDuration, 0.0)
         assertEquals(0.20, RestScorer.wEfficiency, 0.0)
-        assertEquals(0.20, RestScorer.wRestorative, 0.0)
-        assertEquals(0.10, RestScorer.wConsistency, 0.0)
+        assertEquals(0.15, RestScorer.wRestorative, 0.0)
+        assertEquals(0.20, RestScorer.wConsistency, 0.0)
         assertEquals(8.0, RestScorer.defaultSleepNeedHours, 0.0)
         assertEquals(0.50, RestScorer.restorativeTargetShare, 0.0)
     }
@@ -215,19 +215,24 @@ class ChargeEffortRestScoringTest {
     fun rest_compositeWithoutConsistencyUsesNeutral() {
         // 8h asleep (dur 100), eff 0.92 (92), deep 1.5h + REM 2h = 3.5h restorative,
         // share 0.4375 / 0.50 → 87.5. No consistency → NEUTRAL 50 at full weight (Swift parity: the
-        // term is NOT dropped/renormalized). Weights 0.50/0.20/0.20/0.10 sum to 1.0.
+        // term is NOT dropped/renormalized). Weights 0.45/0.20/0.15/0.20 sum to 1.0.
+        // Raw weighted sum = 100*0.45 + 92*0.20 + 87.5*0.15 + 50*0.20 = 86.525, which RestScorer.rest
+        // rounds to 2dp (86.53) — hardcoded rather than left as the raw formula, since the two differ
+        // here by more than EPS.
         val score = RestScorer.rest(
             asleepSeconds = 8 * 3600.0,
             efficiency = 0.92,
             deepSeconds = 1.5 * 3600.0,
             remSeconds = 2.0 * 3600.0,
         )!!
-        val expected = 100.0 * 0.50 + 92.0 * 0.20 + 87.5 * 0.20 + 50.0 * 0.10
+        val expected = 86.53
         assertEquals(expected, score, EPS)
     }
 
     @Test
     fun rest_consistencyTermIncluded() {
+        // Raw weighted sum = 100*0.45 + 92*0.20 + 87.5*0.15 + 80*0.20 = 92.525, rounded to 2dp by
+        // RestScorer.rest (92.53) — hardcoded for the same reason as the test above.
         val score = RestScorer.rest(
             asleepSeconds = 8 * 3600.0,
             efficiency = 0.92,
@@ -235,7 +240,7 @@ class ChargeEffortRestScoringTest {
             remSeconds = 2.0 * 3600.0,
             consistency = 0.80,
         )!!
-        val expected = (100.0 * 0.50 + 92.0 * 0.20 + 87.5 * 0.20 + 80.0 * 0.10) / 1.0
+        val expected = 92.53
         assertEquals(expected, score, EPS)
     }
 
@@ -249,7 +254,7 @@ class ChargeEffortRestScoringTest {
             deepSeconds = 1.0 * 3600.0,
             remSeconds = 1.0 * 3600.0,
         )!!
-        val expected = 50.0 * 0.50 + 95.0 * 0.20 + 100.0 * 0.20 + 50.0 * 0.10
+        val expected = 50.0 * 0.45 + 95.0 * 0.20 + 100.0 * 0.15 + 50.0 * 0.20
         assertEquals(expected, score, EPS)
     }
 
@@ -267,7 +272,7 @@ class ChargeEffortRestScoringTest {
         val score = RestScorer.rest(10 * 3600.0, 0.90, 2.0 * 3600.0, 2.5 * 3600.0)!!
         val restShare = (2.0 + 2.5) / 10.0 // 0.45 → /0.5 → 90
         // No consistency → neutral 50 at full weight (Swift parity). Weights sum to 1.0.
-        val expected = 100.0 * 0.50 + 90.0 * 0.20 + (restShare / 0.50 * 100.0) * 0.20 + 50.0 * 0.10
+        val expected = 100.0 * 0.45 + 90.0 * 0.20 + (restShare / 0.50 * 100.0) * 0.15 + 50.0 * 0.20
         assertEquals(expected, score, EPS)
     }
 

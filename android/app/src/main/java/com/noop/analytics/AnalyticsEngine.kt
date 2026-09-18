@@ -1345,24 +1345,31 @@ object AnalyticsEngine {
  * Faithful Kotlin mirror of the Swift Rest composite (AnalyticsEngine / RestScorer). Keep every
  * constant and the weight set byte-identical to Swift — parity tests enforce it.
  *
- *   Rest = 0.50·duration + 0.20·efficiency + 0.20·restorative + 0.10·consistency
+ *   Rest = 0.45·duration + 0.20·efficiency + 0.15·restorative + 0.20·consistency
  *
  * Each sub-component is itself on 0–100:
  *   duration     — asleep hours / personal need, clamped at 100 (8 h default, refined by recent avg).
  *   efficiency   — asleep / in-bed (0..1) × 100.
  *   restorative  — (deep + REM) / asleep share, normalized by a healthy target share, clamped 100.
- *   consistency  — sleep/wake regularity (0..1) × 100; when the caller has no history it is null and
- *                  the term DROPS, renormalizing the remaining weights (same discipline as recovery).
+ *   consistency  — sleep/wake regularity (0..1) × 100; when the caller has no history it is NULL and
+ *                  scores a NEUTRAL 50 at full weight — the term does NOT drop/renormalize (see `rest()`
+ *                  below, which is the actual, correct behavior; this line above used to say otherwise).
+ *
+ * Weights were 0.50/0.20/0.20/0.10 originally; consistency was doubled to 0.20 on user request, funded
+ * by trimming 0.05 each off duration and restorative (efficiency left untouched). The consistency SIGNAL
+ * itself (`VitalityEngine.sleepConsistency`) is 1 − coefficient-of-variation of trailing nightly sleep
+ * DURATION, not bed/wake-time regularity (WHOOP's own published Sleep Consistency metric) — only this
+ * term's WEIGHT changed here, not what it measures.
  *
  * Outputs APPROXIMATE — not WHOOP's proprietary Sleep Performance.
  */
 object RestScorer {
 
     /** Component weights (sum 1.0 when all present). Byte-identical to Swift. */
-    const val wDuration: Double = 0.50
+    const val wDuration: Double = 0.45
     const val wEfficiency: Double = 0.20
-    const val wRestorative: Double = 0.20
-    const val wConsistency: Double = 0.10
+    const val wRestorative: Double = 0.15
+    const val wConsistency: Double = 0.20
 
     /** Default personal sleep need (hours) before any recent-average refinement. */
     const val defaultSleepNeedHours: Double = 8.0
