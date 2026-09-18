@@ -10,6 +10,48 @@ do not merge entries between the two.
 
 ---
 
+## `ff19afc7` — Sync upstream/main into the fork: Coach, sleep-hr-only, coach-message store, PPG base code, RR source index (2026-09-18)
+
+Merges 476 commits of upstream/main improvements into this fork while preserving fork-specific
+divergences. Highlights:
+
+- Coach (AI chat) is adopted. It was already fully wired in this fork's pre-existing
+  routedPillar/#1862 pillar-sheet mechanism and TodayView dashboard card before this merge even
+  began, so no new navigation plumbing was needed — just resolving a duplicate `case .coach:`
+  git's line-based merge introduced silently (no conflict marker) in RootTabView.swift's switch.
+  This fork's own tab bar (Today/Trends/Sleep/Food/Training) is kept as-is, NOT upstream's
+  Today/Trends/Sleep/Coach-or-More restructuring — Food and Training stay primary tabs.
+- Upstream's parallel "Lift Log" strength-tracking feature (5 GRDB/Room tables, ~40 Swift/Kotlin
+  files, Live Activity, widget) is dropped in favor of this fork's own pre-existing strength-training
+  feature. This required decrementing Android's Room schema from v40 back to v39 (Lift Log was
+  Android schema v40 there, never shipped by this fork) and removing every usage site upstream's
+  merge left behind that referenced now-deleted types (StrandiOSApp.swift's Live Activity wiring,
+  NOOPWidgetBundle.swift, DeviceRegistry.kt/DeviceRegistryDao.kt's per-table delete/reKey methods,
+  three Kotlin test doubles, and an orphaned XlsxSheet.swift that only the deleted Lift Log sheet
+  importer used). schema_oracle.json's roomVersion corrected to 39 on both iOS/Android copies
+  (kept byte-identical).
+- The double-tap dedup fix: adopted upstream's bounded-timestamp-array approach
+  (FrameRouter.dispatchDoubleTapOnce), which is more robust against non-monotonic strap RTC clocks
+  than this fork's prior single-high-water-mark check. Kept this fork's own WRIST_ON/WRIST_OFF
+  dedup, which upstream has no equivalent for.
+- Kept this fork's own Hevy/Liftosaur workout-history importer (LiftingImporter.swift/.kt) —
+  pre-existing since v2.11.0, unrelated to the new Lift Log feature despite the name collision that
+  nearly caused it to be deleted along with Lift Log during triage.
+- Kept this fork's edit-in-place testing-build release strategy (fork-testing-build.yml) over
+  upstream's delete-and-recreate rewrite: this fork already fixed an AltStore/SideStore
+  cache-invalidation bug that delete-and-recreate caused, and reverting to it would reintroduce
+  that regression.
+- Added upstream's Coach voice-input Info.plist usage descriptions (NSSpeechRecognitionUsageDescription,
+  NSMicrophoneUsageDescription) alongside this fork's existing food-scan camera description.
+- GRDB migration chain: kept this fork's v42-food-tracking..v48-food-custom-portions migrations
+  verbatim, combined with upstream's v42-daily-sleep-hr-only, v43-coach-messages,
+  v44-ppg-waveform-base-code, v45-rr-source-index (the duplicate "v42" naming across fork/upstream
+  is safe and deliberate — GRDB migration identity is the string name, not sequential numbering).
+
+main is untouched; this is a merge commit on sync-upstream pending CI verification.
+
+---
+
 ## `0e97d105` — Weight sleep regularity more heavily in the Rest (sleep_performance) score (2026-09-18)
 
 Rest weights were duration 0.50 / efficiency 0.20 / restorative 0.20 /
