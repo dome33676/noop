@@ -10,6 +10,14 @@ do not merge entries between the two.
 
 ---
 
+## `136887b9` — Refresh parity authority (twin map + baseline) after upstream sync (2026-10-02)
+
+The daily Parity Governance CI failed because the checked-in authority no longer
+reproduced from current source after the upstream merge and fork-only features.
+Regenerated with parity_ledger.py --refresh-derived.
+
+---
+
 ## `ff19afc7` — Sync upstream/main into the fork: Coach, sleep-hr-only, coach-message store, PPG base code, RR source index (2026-09-18)
 
 Merges 476 commits of upstream/main improvements into this fork while preserving fork-specific
